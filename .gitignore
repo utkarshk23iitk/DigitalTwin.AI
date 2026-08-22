@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+data/bosch_numeric_sample.csv
+data/*.zip
+.DS_Store
+.streamlit/secrets.toml

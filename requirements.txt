@@ -1,0 +1,18 @@
+# Core
+numpy>=1.26
+pandas>=2.0
+simpy>=4.1
+
+# Defect model + confidence
+scikit-learn>=1.4
+xgboost>=2.0
+
+# Dashboard (Component 6 — the demo app)
+streamlit>=1.34
+
+# Virtual sensor (temporal / Kalman branch — Component 4)
+filterpy>=1.4.5
+
+# Optional: real conformal prediction (we ship a lightweight built-in version,
+# MAPIE is an alternative you can swap in)
+# mapie>=0.8
