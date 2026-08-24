@@ -50,6 +50,7 @@ class LineConfig:
     buffer_capacity: int = 5          # capacity of each inter-station buffer
     warmup: float = 200.0             # seconds discarded before logging
     seed: int = 42
+    sample_interval: float = 5.0      # buffer-level polling period (0 = off)
 
 
 # ------------------------------ state model ------------------------------- #
@@ -94,6 +95,11 @@ class AssemblyLine:
 
         # event log: list of dicts {t, station, state, buffer_in, buffer_out}
         self.log: list[dict] = []
+        # buffer log: fixed-interval samples {t, levels: [...]}. The event log's
+        # buffer readings are taken at state changes — i.e. just after a station
+        # pulls a unit — so they are a biased sample of queue length. Anything
+        # that reasons about buffer occupancy must use this instead.
+        self.buffer_log: list[dict] = []
         self._unit_counter = 0
 
     # -- helpers ----------------------------------------------------------- #
@@ -144,6 +150,16 @@ class AssemblyLine:
             else:
                 yield self.env.timeout(1.0)
 
+    def _monitor(self):
+        """Poll every buffer on a fixed interval, the way real SCADA would."""
+        while True:
+            if self.env.now >= self.cfg.warmup:
+                self.buffer_log.append({
+                    "t": round(self.env.now, 2),
+                    "levels": [len(b.items) for b in self.buffers],
+                })
+            yield self.env.timeout(self.cfg.sample_interval)
+
     def _station_proc(self, i: int):
         """Main loop for station i: take a unit, process it, pass it on."""
         s = self.cfg.stations[i]
@@ -153,9 +169,14 @@ class AssemblyLine:
 
         while True:
             # --- wait for an input unit (STARVED while empty) ---
-            if not in_buf.items:
+            # Ask for the unit first: SimPy triggers the event synchronously if
+            # one is already available, so `.triggered` distinguishes "got it
+            # instantly" from "about to wait" exactly. Testing the buffer
+            # beforehand instead would miss waits that begin inside the yield.
+            get_evt = in_buf.get()
+            if not get_evt.triggered:
                 self._set_state(i, STARVED)
-            unit = yield in_buf.get()
+            unit = yield get_evt
 
             # --- optional random breakdown ---
             if s.failure_rate and random.random() < s.failure_rate:
@@ -173,15 +194,18 @@ class AssemblyLine:
                 unit["defect_flags"].append(i)
 
             # --- hand off downstream (BLOCKED if the buffer is full) ---
-            if hasattr(out_buf, "capacity") and len(out_buf.items) >= out_buf.capacity:
+            put_evt = out_buf.put(unit)
+            if not put_evt.triggered:
                 self._set_state(i, BLOCKED)
-            yield out_buf.put(unit)
+            yield put_evt
 
     # -- public API -------------------------------------------------------- #
 
     def run(self, until: float) -> "AssemblyLine":
         """Run the simulation until the given sim-time and return self."""
         self.env.process(self._source())
+        if self.cfg.sample_interval > 0:
+            self.env.process(self._monitor())
         for i in range(len(self.cfg.stations)):
             self.env.process(self._station_proc(i))
         self.env.run(until=until)

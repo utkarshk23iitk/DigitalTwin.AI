@@ -4,6 +4,7 @@ __pycache__/
 venv/
 .ipynb_checkpoints/
 data/bosch_numeric_sample.csv
+data/train_numeric.csv
 data/*.zip
 .DS_Store
 .streamlit/secrets.toml
