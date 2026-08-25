@@ -1,0 +1,131 @@
+# DigitalTwin.ai — Round 2 Pipeline & Checklist
+
+Working document tracking the full build: what the pipeline does end-to-end, and
+what's done vs. remaining. Complements [DigitalTwin_Round2_Plan.md](DigitalTwin_Round2_Plan.md)
+(the original scope/phasing) and [Digitaltwin project context.md](Digitaltwin%20project%20context.md)
+(Round 1 background, citable facts, cautions) — this file is the living
+build tracker for Round 2.
+
+---
+
+## 1. What the pipeline does (end to end)
+
+```
+OFFLINE (train once)                          LIVE (the demo)
+─────────────────────                          ────────────────
+Run line_sim many times/long           ──►     Fresh simulation run starts
+(health-drift episodes across                          │
+ 3-tier stations: A/B/C)                                ▼
+        │                                      Station states, buffers, sensor
+        ▼                                      readings stream in (Tier A/B dense,
+Build labeled tables                           Tier C sparse/irregular)
+ - per-unit defect table                                │
+ - per-station-window bottleneck table                  ▼
+        │                                      Virtual sensor fills Tier B (spatial
+        ▼                                      regression) + Tier C (Kalman) gaps
+Train defect_model.py (XGBoost)                         │
+Train bottleneck forecaster (optional)                  ▼
+        │                                      defect_model scores unit + confidence
+        ▼                                      bottleneck_detect scores station window
+Save model artifacts                                    │
+                                                          ▼
+                                                Effective Trust = input_trust ×
+                                                model_confidence → gates action
+                                                          │
+                                                          ▼
+                                                Template explanation generated
+                                                (feature importances + trust numbers,
+                                                 no LLM — see §5)
+                                                          │
+                                                          ▼
+                                                Streamlit dashboard: supervisor /
+                                                manager / leadership persona views
+```
+
+Core differentiator carried through every stage: a station's hidden health
+state drives sensor drift, cycle-time/failure-rate creep, *and* defect risk
+together — so bottleneck and defect signals are causally linked, not
+independent random draws. This is what makes trend-based ("advanced")
+prediction meaningful instead of naive thresholding.
+
+---
+
+## 2. Checklist
+
+### Phase A — Data foundation
+- [x] SimPy line simulation with WORKING/BLOCKED/STARVED/DOWN states — `src/line_sim.py`
+- [x] Active-period + queue-growth bottleneck detection — `src/bottleneck_detect.py`
+- [x] Plotly visualization of a sim run (state timeline, buffer heatmap, state composition) — `src/viz.py`
+- [x] Bosch-faithful synthetic defect dataset generator (station-grouped, structural missingness, ~0.58% defect rate, calibrated cross-station correlation) — `data/get_data.py`
+- [x] Real Bosch numeric-file fetch + stratified sample script — `data/fetch_bosch.py`
+- [x] XGBoost defect model with conformal-style confidence — `src/defect_model.py`
+- [x] Conda env `digitaltwin` (Python 3.13.3) set up, all `requirements.txt` deps installed and verified
+- [x] Extend `line_sim.py` with the shared health-state process `H_s(t)` (gradual down→hold→up ramp, never instantaneous; recoverable episodes — most are mild near-misses)
+- [x] Add 3-tier station instrumentation (`A` instrumented / `B` sensor-poor-correlated / `C` sensor-poor-isolated) replacing the binary `has_sensor` (kept as a derived legacy property)
+- [x] Log continuous sensor channels (torque, vibration, temperature) per station per timestep — dense for Tier A, sparse/irregular manual-check for Tier C, absent for Tier B
+- [x] Add delayed-defect fields (`defect_occurred_at` vs `defect_caught_at`) — verified 73% of defects in a test run were caught at a *later* inspection station than where they occurred
+- [x] `data/generate_training_data.py` — runs multiple sessions, persists `station_registry.csv` / `health_log.csv` (hidden ground truth) / `sensor_log.csv` / `unit_features.csv` (observed-only) / `unit_features_true.csv` (validation-only) / `manifest.json` with a chronological train/test split, to `data/simulated/` (gitignored, regenerable)
+- [x] Scaled the persisted dataset to a stable evaluation size (initial pass, later regenerated — see below)
+- [x] **Fixed a real design bug**: station correlation was originally modelled as physical-adjacency smoothing (a latent value blurred across line-neighbours), which conflated "next to each other on the line" with "shares a real physical cause" — wrong, since two distant stations can share tooling/calibration/material-batch while neighbours share nothing. Replaced with explicit shared **process factors**: each station has a loading vector, and correlation follows shared loadings regardless of line position. Verified: Door-Fit (early, body construction) and Torque-2 (late, final assembly) — nowhere near each other — now correlate at 0.459 (health-level, large sample) purely through a shared "torque-calibration rig" factor; a same-position control pair with no shared factor stays near zero
+- [x] Verified the correlation signal is real but noise-diluted at the single-reading level for *weakly*-loaded distant pairs (Door-Fit↔Torque-2 washes to ~0 per-unit despite being real at the health/tick level) — confirms the already-planned windowed/trend feature engineering is necessary, not optional, for the virtual sensor's spatial regression to actually exploit weaker distant correlations. Strongly-loaded partners (Torque-1, Electrical) remain usable even from raw per-unit snapshots (0.77, 0.73)
+- [x] Verified tier isolation end-to-end: Tier B (`S9`) produces **zero** observed columns in `unit_features.csv`; Tier C (`S4`) is ~0.5% populated; Tier A (`S0`) is ~99% populated; `unit_features_true.csv` retains 100% ground truth for every tier
+- [x] **Fixed a second real calibration bug**: strengthening the shared process factor (to fix Tier-B correlation, above) had the side effect of making health chronically degraded (only 58.5% of ticks at perfect health, mean 0.844) instead of rare/brief. Added a dead-zone so only genuine tail excursions of the shared factor cost health — restored to 95% perfectly healthy (mean 0.989) while the correlation fix is still intact (0.80 for the strong pair, isolation preserved for Tier C)
+- [x] **Fixed a third bug**: even after the dead-zone fix, defect-origin health was statistically indistinguishable from the general population — no learnable signal at all (`DEFECT_HEALTH_FACTOR=6` far too weak once degraded time became rare). Empirically swept `DEFECT_HEALTH_FACTOR` (6 → 200) and rescaled baseline defect rates down (~0.42×) until degraded-health periods genuinely account for a distinguishable share of defects, verified directly (defect-origin health vs. population health), while overall rate stays near Bosch's 0.58%
+- [x] Fixed an evaluation-methodology bug: a single held-out session left too few test defects (as low as 4) for any metric to be stable. `generate_training_data.py` now supports `--test-sessions N` (multiple trailing held-out sessions, not just one)
+- [x] **Final calibrated dataset**: 24 sessions × 100,000s (20 train / 4 test) → 32,845 units, **183 defects** (0.56% rate) — this is the current, correct `data/simulated/`
+- [ ] Link `get_data.py`'s cross-sectional Bosch-style generator to reuse this same schema (currently a separate, older generator — kept for the offline Bosch-faithful notebook story per the design decision in [[round2-data-model-design]])
+- [ ] Pull a matched sample of real `train_date.csv` (by `Id`, joined to the existing numeric sample) — optional, for calibrating real station timing distributions
+
+### Phase B — Models
+- [x] `src/virtual_sensor.py` — method is auto-selected per station from MEASURED correlation on training data (not the hard-coded tier label): high correlation with another station -> spatial regression; low correlation but own sparse history -> Kalman; neither -> flagged unrecoverable. Auto-detection matched the hand-designed tiers exactly (station 4 -> temporal, station 9 -> spatial), confirming the tier design is consistent with what the data actually supports
+- [x] Validated on the held-out test session against fair baselines: Kalman beats naive forward-fill by 9-20% across channels; spatial regression beats a naive mean-guess by 29-44% overall and by **54-66% specifically during drift episodes** (the case that actually matters for defect/bottleneck prediction) — real numbers, not fabricated
+- [x] `src/feature_engineering.py` — trend-aware, tier-complete feature table (`data/simulated/model_features.csv`, 32,845 units × 107 features): rolling mean/std/slope for Tier A/C from `sensor_log` (as-of each unit's actual visit time, never leaking a later reading in), Tier B filled via `virtual_sensor.py`'s spatial regression on SMOOTHED neighbor readings, Tier C filled via a full Kalman replay (dense estimate + confidence for every unit, not just the ~0.5% landing on a real check)
+- [x] `src/train_defect_model.py` — retrained on `model_features.csv` with an honest chronological holdout (test sessions never touched until final scoring): **held-out AUC 0.572** (internal calibration-split AUC 0.640) — a real, modest, verified ranking signal, not a strong classifier
+- [x] Because positives are too few for a stable fixed-threshold precision/recall, added **recall-at-top-K%** (rank-based, threshold-free) as the primary reported metric: **top 10% riskiest units catch 25% of actual defects (8/32) — a ~2.5× lift over random selection**. This — a continuous risk score + honest confidence, not a hard binary flag — is the intended input to `effective_trust.py`'s Risk×Trust gating, not a contradiction of it
+- [ ] Defect model: detection lead-time metric (`defect_occurred_at` vs. model-flag time) — real, reportable number
+- [ ] (Optional, "advanced") bottleneck forecasting layer: features = rolling queue-growth/utilization/sensor-drift trend, label = "becomes bottleneck within next N minutes", chronological split
+- [ ] Bottleneck: lead-time / false-alarm-rate evaluation using the hidden ground-truth health process
+- [ ] `src/effective_trust.py` — input_trust × model_confidence fusion + Risk×Trust action-gating matrix
+
+### Phase C — Explanation & UX
+- [ ] Template-based natural-language explanation generator (feature importances + trust/confidence numbers → plain sentence, e.g. "Station 4: risk 0.82, driven by torque drift +3.2σ, Effective Trust 0.50 → human verification required") — no LLM
+- [ ] `src/personas.py` — supervisor (real-time), manager (weekly trends), leadership (ROI/business case) views over the same underlying model
+- [ ] `app.py` — Streamlit dashboard wiring line view, bottleneck flags, defect risks, trust scores, persona tabs
+- [ ] `notebooks/defect_model_training.ipynb` — model-training narrative notebook
+- [ ] (Stretch, only if time allows) Real RAG layer: small team-authored maintenance-notes corpus + retrieval + LLM phrasing — must use a genuine corpus, never faked
+
+### Phase D — Deliverables
+- [ ] `docs/business_proposal.md` — problem framing, solution design, target users, business case & impact, phased roadmap, risks + mitigations
+- [ ] `docs/architecture.md`
+- [ ] Pitch deck (presents proposal + prototype)
+- [ ] Demo video recorded from the running Streamlit app
+- [ ] Final README pass — implementation approach, architecture, dependencies, execution instructions
+- [ ] Repo hygiene check before submission (no secrets, no raw Bosch data committed, requirements.txt current)
+
+---
+
+## 3. Key design decisions (why, not just what)
+
+- **Shared health-state mechanism** ties bottleneck, defect, and virtual-sensor
+  signals to one causal root cause per episode — required for genuinely
+  "advanced" (trend-based) prediction rather than independent random events.
+- **3 instrumentation tiers**, not 2 — Tier B (spatially correlated) and Tier C
+  (temporally smooth, sparse) call for different imputation techniques
+  (spatial regression vs. Kalman filter), matching the brief's real
+  complexity of mixed legacy/modern, richly/poorly instrumented stations.
+- **Train offline, infer live** — models never train on the demo run itself;
+  they're trained on a large batch of historical simulated sessions, saved as
+  artifacts, then applied to a fresh live run. Standard digital-twin pattern,
+  and the only honest way to avoid leaking the predicted event into training.
+- **Chronological (not random) train/test splits** — avoids leaking within a
+  single health episode.
+- **Template explanations now, RAG only as a stretch** — Track 4's brief
+  doesn't require an LLM/RAG layer; the differentiator is virtual sensors +
+  Effective Trust, not narrative generation. A RAG layer is legitimate only
+  with a real retrieval corpus — never fabricated.
+- **No fabricated metrics anywhere** — every number quoted in the proposal or
+  deck must come from an actual run of this pipeline.
+
+See [round2_data_model_design memory] (session-local design notes) for the
+full data schema (station registry, time-series sensor log, per-unit table,
+engineered features) if resuming this build in a new session.

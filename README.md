@@ -39,12 +39,14 @@ digitaltwin-ai/
 ├── README.md
 ├── requirements.txt
 ├── data/
-│   ├── fetch_bosch.py         # [DONE] download real Bosch + cut a sampled CSV
-│   └── get_data.py            # real-Bosch-if-available, else Bosch-faithful synthetic
+│   ├── fetch_bosch.py             # [DONE] download real Bosch + cut a sampled CSV
+│   ├── get_data.py                # real-Bosch-if-available, else Bosch-faithful synthetic
+│   └── generate_training_data.py  # [DONE] persist historical simulated sessions (offline train data)
 ├── src/
-│   ├── line_sim.py            # [DONE] SimPy assembly-line model + state tracking
+│   ├── line_sim.py            # [DONE] SimPy line model + health-driven 3-tier stations
 │   ├── bottleneck_detect.py   # [DONE] active-period + queue-growth detection
-│   ├── defect_model.py        # [DONE] XGBoost + conformal-style confidence
+│   ├── viz.py                  # [DONE] Plotly views of a sim run
+│   ├── defect_model.py        # [DONE] XGBoost + conformal-style confidence (needs retrain on new schema)
 │   ├── virtual_sensor.py      # [TODO] infer sensor-poor station state + confidence
 │   ├── effective_trust.py     # [TODO] fusion + Risk×Trust action matrix
 │   └── personas.py            # [TODO] supervisor / manager / leadership views
@@ -59,8 +61,9 @@ digitaltwin-ai/
 |---|---|---|
 | 1. Line simulation | `src/line_sim.py` | ✅ working |
 | 2. Bottleneck detection | `src/bottleneck_detect.py` | ✅ working (finds the true constraint) |
-| 3. Defect model | `src/defect_model.py` | ✅ working — metrics pending re-run on the real sample |
-| 4. Virtual sensor | `src/virtual_sensor.py` | ⏳ next |
+| 3. Defect model | `src/defect_model.py` + `src/train_defect_model.py` | ✅ retrained on `data/simulated/` — held-out AUC 0.57, top-10%-risk recall 25% (~2.5x lift over random); modest, honest signal, not a strong classifier |
+| 3b. Feature engineering | `src/feature_engineering.py` | ✅ trend-aware, tier-complete (`model_features.csv`) |
+| 4. Virtual sensor | `src/virtual_sensor.py` | ✅ working — method auto-selected from measured correlation, validated against baselines |
 | 5. Effective Trust | `src/effective_trust.py` | ⏳ next |
 | 6. Persona views | `src/personas.py` | ⏳ |
 | 7. Streamlit dashboard | `app.py` | ⏳ |
@@ -72,15 +75,82 @@ python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\ac
 pip install -r requirements.txt
 
 # run individual components
-python src/line_sim.py            # simulate the line, print station stats
-python src/bottleneck_detect.py   # detect the bottleneck
-python data/get_data.py           # show the defect dataset summary
-python data/fetch_bosch.py        # (optional) fetch real Bosch data — see Data note
-python src/defect_model.py        # train + evaluate the defect model
+python src/line_sim.py                    # simulate the line, print station stats
+python src/bottleneck_detect.py           # detect the bottleneck
+python src/viz.py                         # render docs/line_sim_views.html
+python data/get_data.py                   # show the (Bosch-style) defect dataset summary
+python data/fetch_bosch.py                # (optional) fetch real Bosch data — see Data note
 
 # (later) launch the dashboard
 # streamlit run app.py
 ```
+
+### Full pipeline: regenerate data and train the defect model
+
+`data/simulated/` and the trained model artifact are gitignored (regenerable,
+not committed) — run these three steps in order to reproduce them from a
+fresh clone:
+
+```bash
+# 1. generate the offline training data (this exact command reproduces the
+#    "final calibrated dataset" quoted throughout this README/PIPELINE.md:
+#    24 sessions x 100,000s, 20 train / 4 test, ~32,845 units, ~183 defects)
+python data/generate_training_data.py --sessions 24 --duration 100000 --seed 100 --test-sessions 4
+
+# 2. build the trend-aware feature table (data/simulated/model_features.csv)
+python src/feature_engineering.py
+
+# 3. train + evaluate the defect model on a chronological holdout
+python src/train_defect_model.py
+```
+
+Each session's seed is derived deterministically (`seed = --seed + session_index`,
+see `generate_training_data.py`), so the same flags always regenerate the same
+data — nothing here depends on committing the CSVs. Omitting the flags falls
+back to the script's smaller defaults (5 sessions x 50,000s), which is fine for
+a quick smoke test but not the dataset the reported model numbers are based on.
+
+### Simulated training data (`data/generate_training_data.py`)
+
+`line_sim.py` now models a hidden per-station **health state** that drifts
+down in rare, gradual episodes (never instantaneously) and drives three
+things at once: sensor drift, cycle-time/failure-rate creep (→ a *forming*
+bottleneck), and defect risk for units processed during the dip (→ a defect,
+often only caught several stations later at an inspection point). Stations
+carry one of three instrumentation tiers instead of a binary sensor flag:
+
+| Tier | Meaning | How it's filled |
+|---|---|---|
+| **A** | Fully instrumented, dense readings | Ground truth |
+| **B** | No sensor, but correlated with other stations sharing a real cause (tooling, calibration rig, material batch) — **not** assumed to be its line-neighbours | Regression / transfer learning across whichever stations share that cause |
+| **C** | No sensor, ~zero loading on any shared cause, sparse manual checks | Kalman filter |
+
+Correlation is deliberately *not* modelled as physical adjacency — two stations next to each other on the line may share nothing, while two stations far apart can share the same calibration rig. `line_sim.py` assigns each station a loading vector onto a small set of shared process factors; two stations correlate to the extent they load on the same factor(s), regardless of position. Verified: Door-Fit (body construction, early) and Torque-2 (final assembly, late) correlate at 0.46 through a shared torque-calibration factor, while adjacent stations with no shared cause stay near zero.
+
+`generate_training_data.py` is the *offline* half of the pipeline: it runs
+several independent simulated sessions back-to-back (default 5 × 50,000s),
+and writes the result to `data/simulated/` (gitignored — regenerate with the
+command above, same as the Bosch sample):
+
+- `station_registry.csv` — static per-station config
+- `health_log.csv` — **hidden** ground-truth health over time (never a model
+  input; kept only to score detection lead time / false-alarm rate)
+- `sensor_log.csv` — observable channel readings (dense for tier A, sparse
+  for tier C, absent for tier B)
+- `unit_features.csv` — per-unit modelling table: only the *observed*
+  `S{station}_{channel}` columns (tier B columns don't exist at all; tier C
+  columns are ~99.5% empty) — what `defect_model.py` should train on
+- `unit_features_true.csv` — the *true* values behind every reading, for
+  scoring virtual-sensor imputation accuracy only — never join this into
+  model training
+- `manifest.json` — generation parameters + a **chronological** train/test
+  split (train on all sessions but the last, evaluate on the held-out last
+  one) — never split randomly, since that would leak within a single health
+  episode
+
+Models train **offline** on this persisted dataset, then get applied to a
+separate, freshly-started simulation for the live demo — never the same run
+they were trained on.
 
 ## Data note (important, and honest)
 

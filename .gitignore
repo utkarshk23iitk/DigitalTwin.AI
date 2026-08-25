@@ -6,5 +6,6 @@ venv/
 data/bosch_numeric_sample.csv
 data/train_numeric.csv
 data/*.zip
+data/simulated/
 .DS_Store
 .streamlit/secrets.toml
