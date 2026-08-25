@@ -9,3 +9,4 @@ data/*.zip
 data/simulated/
 .DS_Store
 .streamlit/secrets.toml
+*.pdf
