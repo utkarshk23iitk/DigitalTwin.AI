@@ -47,7 +47,8 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from line_sim import HEALTH_TICK, default_line  # noqa: E402
+from line_sim import (DECOY_CHANNELS, HEALTH_TICK, REAL_CHANNELS,  # noqa: E402
+                      default_line)
 
 DATA_DIR = Path(__file__).resolve().parent
 OUT_DIR = DATA_DIR / "simulated"
@@ -61,6 +62,15 @@ def _station_registry(line) -> pd.DataFrame:
             "is_inspection": s.is_inspection, "mean_cycle": s.mean_cycle,
             "failure_rate": s.failure_rate, "base_defect_rate": s.base_defect_rate,
         })
+    return pd.DataFrame(rows)
+
+
+def _channel_registry() -> pd.DataFrame:
+    """Ground-truth tag of which emitted channels are real (health-driven,
+    predictive) vs. decoy (irrelevant). Used downstream to score whether the
+    pipeline correctly discards the decoys -- never fed to the model."""
+    rows = [{"channel": ch, "is_decoy": False} for ch in REAL_CHANNELS]
+    rows += [{"channel": ch, "is_decoy": True} for ch in DECOY_CHANNELS]
     return pd.DataFrame(rows)
 
 
@@ -124,6 +134,7 @@ def generate(n_sessions: int, duration: float, base_seed: int, n_test_sessions: 
 
     OUT_DIR.mkdir(exist_ok=True)
     registry.to_csv(OUT_DIR / "station_registry.csv", index=False)
+    _channel_registry().to_csv(OUT_DIR / "channel_registry.csv", index=False)
     health_log.to_csv(OUT_DIR / "health_log.csv", index=False)
     sensor_log.to_csv(OUT_DIR / "sensor_log.csv", index=False)
     unit_features.to_csv(OUT_DIR / "unit_features.csv", index=False)

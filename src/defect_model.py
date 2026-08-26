@@ -82,9 +82,15 @@ class DefectModel:
         neg = int((y_tr == 0).sum())
         spw = max(1.0, neg / max(1, pos))   # scale_pos_weight for imbalance
 
+        # Regularised for a rare-event, few-positive problem: shallow trees +
+        # a large min_child_weight stop the model memorising individual
+        # defects (an unregularised depth-6 fit hit train-AUC 1.0 / held-out
+        # 0.55 -- pure overfit). gamma/reg_lambda penalise marginal splits so
+        # noise features can't buy their way in.
         self.model = XGBClassifier(
-            n_estimators=300, max_depth=6, learning_rate=0.05,
-            subsample=0.9, colsample_bytree=0.7,
+            n_estimators=250, max_depth=3, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.6,
+            min_child_weight=10, gamma=1.0, reg_lambda=3.0,
             scale_pos_weight=spw, eval_metric="aucpr",
             missing=np.nan, n_jobs=4, random_state=self.seed,
         )

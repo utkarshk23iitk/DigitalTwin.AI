@@ -157,6 +157,25 @@ FAIL_HEALTH_FACTOR = 4.0
 # 0.58%. See PIPELINE.md for the before/after numbers.
 DEFECT_HEALTH_FACTOR = 200.0
 
+# Defect = a spontaneous (precursor-less, unpredictable) component + a
+# health-driven (has a sensor precursor, learnable) component:
+#
+#   rate = SCALE * base_defect_rate
+#          * (SPONTANEOUS_WEIGHT + DEFECT_HEALTH_FACTOR * (1 - health)^2)
+#          ^spontaneous, fires at any health^   ^driven, only when degraded^
+#
+# SPONTANEOUS_WEIGHT sets how many defects have NO precursor -- lowering it
+# from an implicit 1.0 shifts the mix toward degradation-driven defects that
+# a model can actually foresee. This is a *stated modelling assumption*: real
+# lines have both foreseeable (wear/drift) and genuinely random failures; we
+# calibrate to a ~70% foreseeable / ~30% spontaneous split so defect
+# prediction is a real task rather than mostly-noise, while keeping the
+# overall rate near Bosch's 0.58%. SCALE compensates so lowering the weight
+# doesn't also drop the total rate. Both are verified empirically after each
+# change (see the calibration diagnostic), never assumed.
+DEFECT_SPONTANEOUS_WEIGHT = 0.30
+DEFECT_RATE_SCALE = 1.70
+
 # Tier-C stations are read only via an irregular manual check -- this is the
 # probability of a check happening on any given tick (~ every 2500s / 40min
 # on average), matching the brief's "some stations rely entirely on manual
@@ -171,6 +190,29 @@ SENSOR_PARAMS = {
     "vibration":   {"baseline": 0.20, "std": 0.03, "loading": 0.35},
     "temperature": {"baseline": 70.0, "std": 2.0, "loading": 15.0},
 }
+
+# Decoy channels: emitted alongside the real ones (same tier visibility) but
+# with NO link to health/defects -- a real historian is full of channels that
+# are irrelevant to any given fault, and a twin that can't tell them apart is
+# just fitting noise. We tag their ground-truth identity (DECOY_CHANNELS) so
+# the pipeline can later demonstrate it discards them. Two kinds:
+#   - "noise": pure white noise around a baseline -- the trivial case.
+#   - "walk":  a smooth per-station random walk that LOOKS like a genuine
+#              drifting sensor but drives nothing -- the real distractor a
+#              naive feature-importance pass must learn to drop.
+DECOY_WALK_RHO = 0.99        # persistence of the useless random walk
+DECOY_WALK_SIGMA = 0.05      # per-tick innovation of that walk
+DECOY_PARAMS = {
+    "pressure": {"baseline": 30.0, "std": 2.0, "kind": "noise"},
+    "humidity": {"baseline": 45.0, "std": 0.5, "kind": "walk",
+                 "walk_scale": 6.0, "walk_index": 0},
+}
+
+REAL_CHANNELS = tuple(SENSOR_PARAMS)                 # health-driven, predictive
+DECOY_CHANNELS = tuple(DECOY_PARAMS)                 # irrelevant, must be ignored
+ALL_PARAMS = {**SENSOR_PARAMS, **DECOY_PARAMS}       # what the sim actually emits
+ALL_CHANNELS = tuple(ALL_PARAMS)
+_N_WALK_DECOYS = sum(1 for p in DECOY_PARAMS.values() if p.get("kind") == "walk")
 
 
 @dataclass
@@ -199,6 +241,11 @@ class AssemblyLine:
         # Health/sensor dynamics use their own RNG stream so they don't
         # perturb the sequencing of the existing state/breakdown randomness.
         self._nrng = np.random.default_rng(cfg.seed + 1000)
+        # Decoy channels draw from a SEPARATE stream so that adding/removing
+        # them never shifts the core health/defect realization -- decoys must
+        # be purely additive noise, leaving the real signal (and the
+        # calibrated defect count) byte-for-byte identical to a no-decoy run.
+        self._drng = np.random.default_rng(cfg.seed + 2000)
 
         n = len(cfg.stations)
         # buffers[i] feeds station i (buffers[0] is the raw-material source).
@@ -241,6 +288,9 @@ class AssemblyLine:
             if s.factor_loadings:
                 self._loadings[i, :len(s.factor_loadings)] = s.factor_loadings
         self._factors = np.zeros(n_factors)
+        # per-station state for "walk"-kind decoy channels: a smooth random
+        # walk that mimics a drifting sensor but is wired to nothing.
+        self._decoy_walk = np.zeros((n, _N_WALK_DECOYS))
         self._episode = [
             {"phase": "none", "health": 1.0, "tick": 0, "trough": 1.0,
              "start_health": 1.0, "down_ticks": 0, "hold_ticks": 0, "up_ticks": 0}
@@ -268,8 +318,20 @@ class AssemblyLine:
 
     def _true_sensor_value(self, i: int, channel: str, health: float) -> float:
         """The physical value a sensor at station i would read right now,
-        regardless of whether this station's tier actually exposes it."""
-        p = SENSOR_PARAMS[channel]
+        regardless of whether this station's tier actually exposes it.
+
+        Real channels track (1 - health); decoy channels do not -- a "noise"
+        decoy is pure white noise, a "walk" decoy follows a per-station random
+        walk that looks like drift but is wired to nothing."""
+        p = ALL_PARAMS[channel]
+        kind = p.get("kind", "health")
+        if kind == "noise":
+            return float(p["baseline"] + self._drng.normal(0, p["std"]))
+        if kind == "walk":
+            return float(p["baseline"]
+                         + p["walk_scale"] * self._decoy_walk[i, p["walk_index"]]
+                         + self._drng.normal(0, p["std"]))
+        # real (health-driven) channel -- uses the core stream, unchanged.
         return float(p["baseline"] + p["loading"] * (1 - health)
                      + self._nrng.normal(0, p["std"]))
 
@@ -337,7 +399,7 @@ class AssemblyLine:
                 ep["phase"], ep["tick"], ep["health"] = "none", 0, 1.0
 
     def _log_sensors(self, i: int, now: float, health: float):
-        for ch in SENSOR_PARAMS:
+        for ch in ALL_PARAMS:
             val = self._true_sensor_value(i, ch, health)
             self.sensor_log.append({"t": round(now, 2), "station": i,
                                     "channel": ch, "value": round(val, 4)})
@@ -348,6 +410,13 @@ class AssemblyLine:
         n = len(self.rt)
         while True:
             now = self.env.now
+            # advance the useless decoy random walk(s) once per tick, in step
+            # with the health process so their sampling cadence matches a real
+            # channel's -- only their *meaning* (none) differs.
+            if _N_WALK_DECOYS:
+                self._decoy_walk = (DECOY_WALK_RHO * self._decoy_walk
+                                    + self._drng.normal(0, DECOY_WALK_SIGMA,
+                                                        (n, _N_WALK_DECOYS)))
             if self._n_factors:
                 innovation = self._nrng.normal(0, SEG_SIGMA, self._n_factors)
                 self._factors = SEG_RHO * self._factors + innovation
@@ -448,7 +517,7 @@ class AssemblyLine:
             health = r.health
             now = self.env.now
             if now >= self.cfg.warmup:
-                for ch in SENSOR_PARAMS:
+                for ch in ALL_PARAMS:
                     true_v = self._true_sensor_value(i, ch, health)
                     if s.tier == "A":
                         obs_v = true_v
@@ -466,8 +535,9 @@ class AssemblyLine:
 
             # synthesise a ground-truth defect event for this station,
             # more likely while unhealthy -- never a flat, health-blind rate
-            eff_defect_rate = min(0.9, s.base_defect_rate
-                                  * (1 + DEFECT_HEALTH_FACTOR * (1 - health) ** 2))
+            eff_defect_rate = min(0.9, DEFECT_RATE_SCALE * s.base_defect_rate
+                                  * (DEFECT_SPONTANEOUS_WEIGHT
+                                     + DEFECT_HEALTH_FACTOR * (1 - health) ** 2))
             if random.random() < eff_defect_rate:
                 unit["defect_flags"].append(i)
 

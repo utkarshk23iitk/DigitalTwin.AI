@@ -92,7 +92,12 @@ def build_tier_a_c_features(unit_visit_times: pd.DataFrame, sensor_log: pd.DataF
         visits = unit_visit_times[unit_visit_times["station"] == station][
             ["session_id", "unit_id", "t_global"]]
 
-        for ch in CHANNELS:
+        # Iterate whatever channels this station actually emits -- real AND
+        # decoy. Decoys become trend features exactly like real ones (the
+        # model is never told which is which); train_defect_model.py later
+        # checks that importance ranks them low. Tier-B/C imputation below
+        # still runs on real CHANNELS only -- we don't reconstruct noise.
+        for ch in sorted(s_log["channel"].unique()):
             t_ch = trend[trend["channel"] == ch][
                 ["session_id", "t_global", "roll_mean", "roll_std", "roll_slope"]]
             merged = _asof_join_trend(visits, t_ch, tolerance=staleness)
