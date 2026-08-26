@@ -124,13 +124,24 @@ class DefectModel:
         from the decision threshold, ranked against the calibration score
         distribution. Scores near the boundary -> low confidence; scores far
         into either region -> high confidence.
+
+        Normalisation is PER SIDE: a score's distance from the threshold
+        percentile is divided by how much room exists on that side (thr_pos
+        below, 1 - thr_pos above). Under heavy imbalance the threshold sits at
+        a high percentile, so the positive side is a thin sliver; normalising
+        by the *larger* side (as a single global divisor would) crushed all
+        high-risk confidences toward ~0. Per-side scaling lets a confidently
+        high-risk unit reach ~1.0, so the score spans a usable 0-1 range for
+        both the trust fusion and the dashboard.
         """
         cal = self._cal_scores
         # empirical CDF position of each score within calibration distribution
         pos = np.searchsorted(cal, scores) / max(1, len(cal))
-        # distance of that percentile from the threshold's percentile
+        # distance of that percentile from the threshold's percentile, scaled
+        # by the room available on whichever side the score falls.
         thr_pos = np.searchsorted(cal, self.threshold) / max(1, len(cal))
-        conf = np.abs(pos - thr_pos) / max(thr_pos, 1 - thr_pos, 1e-9)
+        side = np.where(pos >= thr_pos, 1.0 - thr_pos, thr_pos)
+        conf = np.abs(pos - thr_pos) / np.maximum(side, 1e-9)
         return np.clip(conf, 0.0, 1.0)
 
     def predict_with_confidence(self, X: pd.DataFrame) -> pd.DataFrame:

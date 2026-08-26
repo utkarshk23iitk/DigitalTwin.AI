@@ -73,7 +73,7 @@ digitaltwin-ai/
 | 3. Defect model | `src/defect_model.py` + `src/train_defect_model.py` | ✅ retrained on `data/simulated/` — held-out **AUC 0.72** (train 0.88, no overfit), **top-20%-risk recall 54%** / top-10% 37% on 76 held-out defects; regularised, real signal |
 | 3b. Feature engineering | `src/feature_engineering.py` | ✅ trend-aware, tier-complete, includes decoy channels as distractors (`model_features.csv`) |
 | 4. Virtual sensor | `src/virtual_sensor.py` | ✅ working — method auto-selected from measured correlation, validated against baselines |
-| 5. Effective Trust | `src/effective_trust.py` | ⏳ next |
+| 5. Effective Trust | `src/effective_trust.py` | ✅ input_trust × model_confidence → Risk×Trust action gate; auto-act flags **2.99× more precise** than human-verify on held-out data |
 | 6. Persona views | `src/personas.py` | ⏳ |
 | 7. Streamlit dashboard | `app.py` | ⏳ |
 

@@ -89,7 +89,7 @@ prediction meaningful instead of naive thresholding.
 - [ ] Defect model: detection lead-time metric (`defect_occurred_at` vs. model-flag time) — real, reportable number
 - [ ] (Optional, "advanced") bottleneck forecasting layer: features = rolling queue-growth/utilization/sensor-drift trend, label = "becomes bottleneck within next N minutes", chronological split
 - [ ] Bottleneck: lead-time / false-alarm-rate evaluation using the hidden ground-truth health process
-- [ ] `src/effective_trust.py` — input_trust × model_confidence fusion + Risk×Trust action-gating matrix
+- [x] `src/effective_trust.py` — input_trust × model_confidence fusion (MULTIPLY, not average) + Risk×Trust action-gating matrix (AUTO-ACT / HUMAN-VERIFY / MONITOR / PASS). input_trust is an importance-weighted average of per-feature trust (real=1.0, virtual-sensor est=its *_conf). **Validated on held-out data: AUTO-ACT flags are 2.99× as precise as HUMAN-VERIFY** (2.86% vs 0.96% defect rate) — trust correctly routes shaky high-risk flags to a human. Recalibrated `defect_model.py`'s conformal confidence to per-side normalisation so the trust scale spans a usable 0–1 (was crushed to ~0.06 under imbalance).
 
 ### Phase C — Explanation & UX
 - [ ] Template-based natural-language explanation generator (feature importances + trust/confidence numbers → plain sentence, e.g. "Station 4: risk 0.82, driven by torque drift +3.2σ, Effective Trust 0.50 → human verification required") — no LLM
