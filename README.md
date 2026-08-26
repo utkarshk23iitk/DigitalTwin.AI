@@ -61,7 +61,7 @@ digitaltwin-ai/
 │   └── personas.py            # [TODO] supervisor / manager / leadership views
 ├── notebooks/
 │   └── defect_model_training.ipynb   # [TODO] model-training narrative
-└── app.py                     # [TODO] Streamlit dashboard (the demo)
+└── app.py                     # [DONE] Streamlit dashboard (the demo)
 ```
 
 ## Status
@@ -75,7 +75,7 @@ digitaltwin-ai/
 | 4. Virtual sensor | `src/virtual_sensor.py` | ✅ working — method auto-selected from measured correlation, validated against baselines |
 | 5. Effective Trust | `src/effective_trust.py` | ✅ input_trust × model_confidence → Risk×Trust action gate; auto-act flags **2.99× more precise** than human-verify on held-out data |
 | 6. Persona views | `src/personas.py` | ✅ supervisor / manager / leadership — three lenses over one shared model state (bottleneck + risk + trust) |
-| 7. Streamlit dashboard | `app.py` | ⏳ |
+| 7. Streamlit dashboard | `app.py` | ✅ `streamlit run app.py` — supervisor/manager/leadership tabs, live trust-policy slider, over the production model |
 
 ## Quickstart
 
@@ -90,8 +90,9 @@ python src/viz.py                         # render docs/line_sim_views.html
 python data/get_data.py                   # show the (Bosch-style) defect dataset summary
 python data/fetch_bosch.py                # (optional) fetch real Bosch data — see Data note
 
-# (later) launch the dashboard
-# streamlit run app.py
+# launch the dashboard (the demo) — needs a trained model, so run the
+# "Full pipeline" steps below once first
+streamlit run app.py
 ```
 
 ### Full pipeline: regenerate data and train the defect model

@@ -94,7 +94,7 @@ prediction meaningful instead of naive thresholding.
 ### Phase C — Explanation & UX
 - [ ] Template-based natural-language explanation generator (feature importances + trust/confidence numbers → plain sentence, e.g. "Station 4: risk 0.82, driven by torque drift +3.2σ, Effective Trust 0.50 → human verification required") — no LLM
 - [x] `src/personas.py` — supervisor (shop-floor: current/forming bottleneck, action queue, blind spots), manager (per-shift defect/action/trust trends), leadership (early-catch %, automation rate at a fixed trust policy, cited-anchor business context) — three projections of ONE shared per-unit assessment, so numbers are consistent across all three. All modules train on the same decoy-dropped production feature set via `load_production_split()`.
-- [ ] `app.py` — Streamlit dashboard wiring line view, bottleneck flags, defect risks, trust scores, persona tabs
+- [x] `app.py` — Streamlit dashboard: line/bottleneck view, risk×trust action scatter, per-shift trends, early-catch lift curve, three persona tabs, and a live trust-policy slider that re-gates the action matrix. Trains the same decoy-dropped production model via `load_production_split()`; all render paths validated headless with `streamlit.testing.v1.AppTest`.
 - [ ] `notebooks/defect_model_training.ipynb` — model-training narrative notebook
 - [ ] (Stretch, only if time allows) Real RAG layer: small team-authored maintenance-notes corpus + retrieval + LLM phrasing — must use a genuine corpus, never faked
 
