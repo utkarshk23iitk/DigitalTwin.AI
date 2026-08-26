@@ -49,7 +49,21 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from defect_model import DefectModel  # noqa: E402
-from train_defect_model import load_split  # noqa: E402
+from train_defect_model import (_channel_of_feature, _load_decoy_channels,  # noqa: E402
+                                load_split)
+
+
+def load_production_split():
+    """load_split, then drop the decoy-derived features. The production model
+    uses REAL channels only -- feature selection (permutation importance +
+    ablation, in train_defect_model.py) showed the decoys add no value and
+    dropping them improves held-out AUC. Every downstream module (this one,
+    personas.py, the dashboard) trains on this same real-only set so the
+    numbers are consistent with the headline metrics."""
+    features, X, y, train_mask, test_mask = load_split()
+    decoys = _load_decoy_channels()
+    real_cols = [c for c in X.columns if _channel_of_feature(c) not in decoys]
+    return features, X[real_cols], y, train_mask, test_mask
 
 # Action labels (the Risk x Trust matrix cells).
 AUTO_ACT = "AUTO-ACT"          # high risk, high trust -> automatic hold/reject
@@ -180,7 +194,7 @@ def _report(assessment: pd.DataFrame, y_true: np.ndarray,
 
 
 def main() -> None:
-    features, X, y, train_mask, test_mask = load_split()
+    features, X, y, train_mask, test_mask = load_production_split()
     print(f"training defect model on {int(train_mask.sum())} units "
           f"({int(y[train_mask].sum())} defects)...")
     model = DefectModel().fit(X[train_mask], y[train_mask])

@@ -74,7 +74,7 @@ digitaltwin-ai/
 | 3b. Feature engineering | `src/feature_engineering.py` | ✅ trend-aware, tier-complete, includes decoy channels as distractors (`model_features.csv`) |
 | 4. Virtual sensor | `src/virtual_sensor.py` | ✅ working — method auto-selected from measured correlation, validated against baselines |
 | 5. Effective Trust | `src/effective_trust.py` | ✅ input_trust × model_confidence → Risk×Trust action gate; auto-act flags **2.99× more precise** than human-verify on held-out data |
-| 6. Persona views | `src/personas.py` | ⏳ |
+| 6. Persona views | `src/personas.py` | ✅ supervisor / manager / leadership — three lenses over one shared model state (bottleneck + risk + trust) |
 | 7. Streamlit dashboard | `app.py` | ⏳ |
 
 ## Quickstart
