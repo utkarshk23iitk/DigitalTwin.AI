@@ -39,6 +39,8 @@ import pandas as pd
 from filterpy.kalman import KalmanFilter
 from sklearn.linear_model import LinearRegression
 
+from tuning_config import VIRTUAL_SENSOR_PARAMS_PATH, load_json
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "simulated"
 CHANNELS = ("torque", "vibration", "temperature")
 
@@ -48,9 +50,20 @@ CHANNELS = ("torque", "vibration", "temperature")
 # noise -- fall back to a temporal filter instead. Chosen, not measured; a
 # real deployment would tune this against how much a wrong regression could
 # cost versus a wider Kalman confidence interval.
-CORR_THRESHOLD = 0.30
-MIN_PAIR_ROWS = 30          # minimum overlapping rows to trust a correlation
+DEFAULT_VIRTUAL_SENSOR_PARAMS = {
+    "corr_threshold": 0.30,
+    "min_pair_rows": 30,
+    "q_scale": 0.5,
+    "r_scale": 1.0,
+    "r_floor": 1e-6,
+}
 HEALTH_TICK = 10.0           # must match line_sim.HEALTH_TICK
+
+
+def load_tuned_virtual_sensor_params() -> dict:
+    payload = load_json(VIRTUAL_SENSOR_PARAMS_PATH, default={}) or {}
+    params = payload.get("params", {})
+    return {**DEFAULT_VIRTUAL_SENSOR_PARAMS, **params}
 
 
 def _station_of(col: str) -> int:
@@ -79,7 +92,9 @@ def _test(df: pd.DataFrame, manifest: dict) -> pd.DataFrame:
     return df[df["session_id"].isin(manifest["test_sessions"])]
 
 
-def rank_predictors(true_train: pd.DataFrame, target_col: str) -> list[tuple[str, float]]:
+def rank_predictors(true_train: pd.DataFrame, target_col: str,
+                    min_pair_rows: int = DEFAULT_VIRTUAL_SENSOR_PARAMS["min_pair_rows"]
+                    ) -> list[tuple[str, float]]:
     """Correlate target_col against every OTHER station's same channel,
     using true values so a tier-B station (never observed) can still be
     assessed for predictability during offline calibration."""
@@ -92,7 +107,7 @@ def rank_predictors(true_train: pd.DataFrame, target_col: str) -> list[tuple[str
     ranked = []
     for c in candidates:
         m = true_train[[target_col, c]].dropna()
-        if len(m) >= MIN_PAIR_ROWS:
+        if len(m) >= min_pair_rows:
             r = m[target_col].corr(m[c])
             if pd.notna(r):
                 ranked.append((c, float(r)))
@@ -160,11 +175,13 @@ class TemporalVirtualSensor:
         self._q_per_tick = q_per_tick
 
 
-def _calibrate_kalman(sensor_log_train: pd.DataFrame, station: int, channel: str
+def _calibrate_kalman(sensor_log_train: pd.DataFrame, station: int, channel: str,
+                      params: dict | None = None
                       ) -> TemporalVirtualSensor | None:
     """Estimate process noise per tick from the gaps between real checks,
     and measurement noise from short-gap consecutive readings. Uses only the
     station's own sparse OBSERVED history -- no hidden ground truth."""
+    cfg = {**DEFAULT_VIRTUAL_SENSOR_PARAMS, **(params or {})}
     s = (sensor_log_train[(sensor_log_train["station"] == station)
                           & (sensor_log_train["channel"] == channel)]
          .sort_values("t_global"))
@@ -178,16 +195,18 @@ def _calibrate_kalman(sensor_log_train: pd.DataFrame, station: int, channel: str
     # method-of-moments: Var(diff) ~= q_per_tick * ticks + 2r (a jump plus
     # the noise in each of the two endpoint readings)
     per_tick_sq = (diffs ** 2) / gaps_ticks
-    q_per_tick = float(np.median(per_tick_sq)) * 0.5
-    r = max(1e-6, float(np.var(diffs[gaps_ticks <= 1.5])) / 2.0) if np.any(gaps_ticks <= 1.5) \
-        else max(1e-6, q_per_tick)
+    q_per_tick = float(np.median(per_tick_sq)) * float(cfg["q_scale"])
+    r_guess = (float(np.var(diffs[gaps_ticks <= 1.5])) / 2.0) if np.any(gaps_ticks <= 1.5) \
+        else q_per_tick
+    r = max(float(cfg["r_floor"]), float(r_guess) * float(cfg["r_scale"]))
     sensor = TemporalVirtualSensor(station, channel, q=q_per_tick, r=r, x0=float(vals[-1]))
     sensor.set_q_per_tick(q_per_tick)
     sensor.last_t = float(ts[-1])
     return sensor
 
 
-def fit_virtual_sensors(verbose: bool = True) -> dict:
+def fit_virtual_sensors(verbose: bool = True, params: dict | None = None) -> dict:
+    cfg = {**DEFAULT_VIRTUAL_SENSOR_PARAMS, **(params or {})}
     true, obs, registry, sensor_log, manifest = load_all()
     true_train = _train(true, manifest)
     sensor_log_train = _train(sensor_log, manifest)
@@ -199,11 +218,11 @@ def fit_virtual_sensors(verbose: bool = True) -> dict:
         tier = registry.loc[registry["station"] == station, "tier"].iloc[0]
         for ch in CHANNELS:
             target_col = f"S{station}_{ch}"
-            ranked = rank_predictors(true_train, target_col)
+            ranked = rank_predictors(true_train, target_col, int(cfg["min_pair_rows"]))
             best = ranked[0] if ranked else None
 
-            if best and abs(best[1]) >= CORR_THRESHOLD:
-                predictor_cols = [c for c, r in ranked if abs(r) >= CORR_THRESHOLD][:3]
+            if best and abs(best[1]) >= float(cfg["corr_threshold"]):
+                predictor_cols = [c for c, r in ranked if abs(r) >= float(cfg["corr_threshold"])][:3]
                 # Predictors come from the OBSERVED table (what's actually
                 # available live); the target comes from the TRUE table,
                 # since a tier-B target has no observed column at all. Join
@@ -213,7 +232,7 @@ def fit_virtual_sensors(verbose: bool = True) -> dict:
                 true_side = _train(true, manifest)[keys + [target_col]]
                 train_rows = obs_side.merge(true_side, on=keys, how="inner").drop(columns=keys)
                 train_rows = train_rows.dropna()
-                if len(train_rows) < MIN_PAIR_ROWS:
+                if len(train_rows) < int(cfg["min_pair_rows"]):
                     method, detail = "unrecoverable", {"reason": "too few complete rows to fit"}
                 else:
                     model = LinearRegression().fit(
@@ -225,7 +244,7 @@ def fit_virtual_sensors(verbose: bool = True) -> dict:
                              "sensor": SpatialVirtualSensor(
                                  station, ch, predictor_cols, model, float(resid.std()))}
             else:
-                kalman = _calibrate_kalman(sensor_log_train, station, ch)
+                kalman = _calibrate_kalman(sensor_log_train, station, ch, cfg)
                 if kalman is not None:
                     method = "temporal"
                     detail = {"sensor": kalman,
@@ -328,7 +347,7 @@ def validate(sensors: dict) -> pd.DataFrame:
 if __name__ == "__main__":
     print("Fitting virtual sensors (method chosen from measured correlation, "
           "not the tier label):")
-    sensors = fit_virtual_sensors()
+    sensors = fit_virtual_sensors(params=load_tuned_virtual_sensor_params())
 
     print("\nValidating against the held-out test session (never used for fitting):")
     report = validate(sensors)

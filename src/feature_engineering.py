@@ -39,14 +39,17 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from virtual_sensor import (CHANNELS, HEALTH_TICK, SpatialVirtualSensor,  # noqa: E402
-                            TemporalVirtualSensor, fit_virtual_sensors, load_all)
+                            TemporalVirtualSensor, fit_virtual_sensors, load_all,
+                            load_tuned_virtual_sensor_params)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "simulated"
 
-TIER_A_WINDOW_TICKS = 6         # ~60s trailing window for dense (tier A) channels
-TIER_A_MAX_STALENESS = 60.0     # seconds; beyond this, "current" reading is missing
-TIER_C_WINDOW_CHECKS = 3        # trailing window in NUMBER of real checks, not ticks
-TIER_C_MAX_STALENESS = 3600.0   # seconds; beyond this, rely on the Kalman estimate only
+DEFAULT_FEATURE_PARAMS = {
+    "tier_a_window_ticks": 6,
+    "tier_a_max_staleness": 60.0,
+    "tier_c_window_checks": 3,
+    "tier_c_max_staleness": 3600.0,
+}
 
 
 def _rolling_trend(sensor_log: pd.DataFrame, window: int) -> pd.DataFrame:
@@ -77,15 +80,16 @@ def _asof_join_trend(visits: pd.DataFrame, trend: pd.DataFrame, tolerance: float
 
 
 def build_tier_a_c_features(unit_visit_times: pd.DataFrame, sensor_log: pd.DataFrame,
-                            registry: pd.DataFrame) -> pd.DataFrame:
+                            registry: pd.DataFrame, params: dict | None = None) -> pd.DataFrame:
     """Rolling trend features for every station whose own channel is ever
     directly observed (tier A dense, tier C sparse)."""
+    cfg = {**DEFAULT_FEATURE_PARAMS, **(params or {})}
     frames = []
     observed_stations = sensor_log["station"].unique()
     for station in observed_stations:
         tier = registry.loc[registry["station"] == station, "tier"].iloc[0]
-        window = TIER_A_WINDOW_TICKS if tier == "A" else TIER_C_WINDOW_CHECKS
-        staleness = TIER_A_MAX_STALENESS if tier == "A" else TIER_C_MAX_STALENESS
+        window = int(cfg["tier_a_window_ticks"]) if tier == "A" else int(cfg["tier_c_window_checks"])
+        staleness = float(cfg["tier_a_max_staleness"]) if tier == "A" else float(cfg["tier_c_max_staleness"])
 
         s_log = sensor_log[sensor_log["station"] == station]
         trend = _rolling_trend(s_log, window)
@@ -210,17 +214,18 @@ def build_tier_c_kalman_features(sensors: dict, unit_visit_times: pd.DataFrame,
     return out.reset_index()
 
 
-def build_features(verbose: bool = True) -> pd.DataFrame:
+def build_features(verbose: bool = True, params: dict | None = None) -> pd.DataFrame:
+    cfg = {**DEFAULT_FEATURE_PARAMS, **load_tuned_virtual_sensor_params(), **(params or {})}
     true, obs, registry, sensor_log, manifest = load_all()
     unit_visit_times = pd.read_csv(DATA_DIR / "unit_visit_times.csv")
 
     if verbose:
         print("[1/4] fitting virtual sensors (needed for tier B/C features)...")
-    sensors = fit_virtual_sensors(verbose=False)
+    sensors = fit_virtual_sensors(verbose=False, params=cfg)
 
     if verbose:
         print("[2/4] tier A/C rolling trend features...")
-    tier_ac = build_tier_a_c_features(unit_visit_times, sensor_log, registry)
+    tier_ac = build_tier_a_c_features(unit_visit_times, sensor_log, registry, cfg)
 
     if verbose:
         print("[3/4] tier B spatial-imputed features...")

@@ -10,6 +10,7 @@ kaggle>=1.6
 # Defect model + confidence
 scikit-learn>=1.4
 xgboost>=2.0
+optuna>=4.0
 
 # Dashboard (Component 6 — the demo app)
 streamlit>=1.34

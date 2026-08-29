@@ -17,6 +17,7 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -27,7 +28,9 @@ from sklearn.inspection import permutation_importance
 from sklearn.metrics import matthews_corrcoef, precision_score, recall_score, roc_auc_score
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from defect_model import DefectModel  # noqa: E402
+from defect_model import DefectModel, load_tuned_defect_config  # noqa: E402
+from tuning_config import (TRAINED_MODEL_META_PATH, TRAINED_MODEL_PATH,  # noqa: E402
+                           ensure_artifact_dirs, save_json)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "simulated"
 NON_FEATURE_COLS = ["session_id", "unit_id", "response", "defect_occurred_at", "defect_caught_at"]
@@ -178,14 +181,44 @@ def load_split():
     return features, X, y, train_mask, test_mask
 
 
+def save_trained_artifacts(model: DefectModel, feature_columns: list[str],
+                           train_rows: int, test_rows: int) -> None:
+    ensure_artifact_dirs()
+    model.model.save_model(TRAINED_MODEL_PATH)
+    meta = {
+        "threshold": model.threshold,
+        "feature_names": feature_columns,
+        "xgb_params": model.xgb_params,
+        "threshold_params": model.threshold_params,
+        "train_rows": train_rows,
+        "test_rows": test_rows,
+        "metrics": vars(model.metrics) if model.metrics is not None else None,
+    }
+    save_json(TRAINED_MODEL_META_PATH, meta)
+    print(f"\n[write] {TRAINED_MODEL_PATH}")
+    print(f"[write] {TRAINED_MODEL_META_PATH}")
+
+
 def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--use-tuned", action="store_true",
+                    help="load best saved Optuna params from artifacts/tuning/")
+    args = ap.parse_args()
+
     features, X, y, train_mask, test_mask = load_split()
 
     print(f"train rows: {train_mask.sum()} ({y[train_mask].sum()} defects)")
     print(f"test  rows: {test_mask.sum()} ({y[test_mask].sum()} defects)  "
           f"<- held out, never seen until here\n")
 
-    model = DefectModel().fit(X[train_mask], y[train_mask])
+    tuned = load_tuned_defect_config() if args.use_tuned else {
+        "xgb_params": None,
+        "threshold_params": None,
+    }
+    model = DefectModel(xgb_params=tuned["xgb_params"],
+                        threshold_params=tuned["threshold_params"],
+                        auto_load_tuned=args.use_tuned).fit(
+                            X[train_mask], y[train_mask])
     print("--- internal calibration-split metrics (within train sessions only) ---")
     m = model.metrics
     print(f"  MCC={m.mcc:.3f}  precision={m.precision:.3f}  recall={m.recall:.3f}  "
@@ -282,6 +315,9 @@ def main():
         print(f"\n  summary  AUC {before['auc']:.3f} -> {after['auc']:.3f}   "
               f"top10% {b10[0]}/{b10[1]} -> {a10[0]}/{a10[1]}   "
               f"top20% {b20[0]}/{b20[1]} -> {a20[0]}/{a20[1]}")
+        save_trained_artifacts(model_real, list(real_cols), int(train_mask.sum()), int(test_mask.sum()))
+    else:
+        save_trained_artifacts(model, list(X.columns), int(train_mask.sum()), int(test_mask.sum()))
 
 
 if __name__ == "__main__":

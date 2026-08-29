@@ -31,16 +31,55 @@ from sklearn.metrics import matthews_corrcoef, precision_score, recall_score
 from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 
+from tuning_config import DEFECT_PARAMS_PATH, load_json
 
-def _best_threshold_mcc(y_true, scores):
+
+DEFAULT_XGB_PARAMS = {
+    "n_estimators": 250,
+    "max_depth": 3,
+    "learning_rate": 0.05,
+    "subsample": 0.8,
+    "colsample_bytree": 0.6,
+    "min_child_weight": 10,
+    "gamma": 1.0,
+    "reg_lambda": 3.0,
+    "reg_alpha": 0.0,
+    "max_delta_step": 1.0,
+    "max_bin": 256,
+    "grow_policy": "depthwise",
+    "tree_method": "hist",
+    "objective": "binary:logistic",
+    "n_jobs": 4,
+}
+
+DEFAULT_THRESHOLD_PARAMS = {
+    "quantile_low": 0.70,
+    "quantile_high": 0.999,
+    "num_thresholds": 120,
+}
+
+
+def load_tuned_defect_config() -> dict:
+    payload = load_json(DEFECT_PARAMS_PATH, default={}) or {}
+    params = payload.get("params", {})
+    xgb_params = {**DEFAULT_XGB_PARAMS, **params.get("xgb_params", {})}
+    threshold_params = {**DEFAULT_THRESHOLD_PARAMS, **params.get("threshold_params", {})}
+    return {"xgb_params": xgb_params, "threshold_params": threshold_params}
+
+
+def _best_threshold_mcc(y_true, scores, threshold_params: dict | None = None):
     """
     Pick an operating threshold maximising MCC over a wide quantile range.
     At extreme imbalance MCC can be degenerate, so we skip thresholds that flag
     nothing. Under-detecting defects is worse than over-flagging (asymmetric
     cost, per the brief), so the wide search leans toward catching positives.
     """
+    cfg = {**DEFAULT_THRESHOLD_PARAMS, **(threshold_params or {})}
+    q_low = float(np.clip(cfg["quantile_low"], 0.01, 0.99))
+    q_high = float(np.clip(cfg["quantile_high"], q_low + 1e-4, 0.9999))
+    n_thr = int(np.clip(cfg["num_thresholds"], 20, 400))
     best_t, best_mcc = 0.5, -1.0
-    for t in np.quantile(scores, np.linspace(0.70, 0.999, 120)):
+    for t in np.quantile(scores, np.linspace(q_low, q_high, n_thr)):
         pred = (scores >= t).astype(int)
         if pred.sum() == 0:
             continue
@@ -62,8 +101,18 @@ class DefectMetrics:
 
 
 class DefectModel:
-    def __init__(self, seed: int = 42):
+    def __init__(self, seed: int = 42, xgb_params: dict | None = None,
+                 threshold_params: dict | None = None, auto_load_tuned: bool = True):
         self.seed = seed
+        tuned = (load_tuned_defect_config()
+                 if auto_load_tuned and xgb_params is None and threshold_params is None
+                 else {})
+        self.xgb_params = {**DEFAULT_XGB_PARAMS, **tuned.get("xgb_params", {}), **(xgb_params or {})}
+        self.threshold_params = {
+            **DEFAULT_THRESHOLD_PARAMS,
+            **tuned.get("threshold_params", {}),
+            **(threshold_params or {}),
+        }
         self.model: XGBClassifier | None = None
         self.threshold: float = 0.5
         self.metrics: DefectMetrics | None = None
@@ -88,17 +137,15 @@ class DefectModel:
         # 0.55 -- pure overfit). gamma/reg_lambda penalise marginal splits so
         # noise features can't buy their way in.
         self.model = XGBClassifier(
-            n_estimators=250, max_depth=3, learning_rate=0.05,
-            subsample=0.8, colsample_bytree=0.6,
-            min_child_weight=10, gamma=1.0, reg_lambda=3.0,
+            **self.xgb_params,
             scale_pos_weight=spw, eval_metric="aucpr",
-            missing=np.nan, n_jobs=4, random_state=self.seed,
+            missing=np.nan, random_state=self.seed,
         )
         self.model.fit(X_tr, y_tr)
 
         # threshold on calibration set (MCC-optimal)
         cal_scores = self.model.predict_proba(X_cal)[:, 1]
-        self.threshold, _ = _best_threshold_mcc(y_cal, cal_scores)
+        self.threshold, _ = _best_threshold_mcc(y_cal, cal_scores, self.threshold_params)
         self._cal_scores = np.sort(cal_scores)
 
         # evaluate on held-out test set
@@ -164,7 +211,9 @@ if __name__ == "__main__":
     from get_data import load_defect_data
 
     X, y, meta = load_defect_data()
-    m = DefectModel().fit(X, y)
+    tuned = load_tuned_defect_config()
+    m = DefectModel(xgb_params=tuned["xgb_params"],
+                    threshold_params=tuned["threshold_params"]).fit(X, y)
     met = m.metrics
     print(f"data source : {meta['source']}")
     print(f"test set    : {met.n_test} parts, {met.n_pos_test} defects")
