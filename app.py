@@ -186,6 +186,77 @@ def _inject_theme() -> None:
         div[data-testid="stDataFrame"] {
             font-size: 0.98rem;
         }
+        section[data-testid="stSidebar"] {
+            background: linear-gradient(180deg, rgba(255,255,255,0.95), rgba(247,243,234,0.98));
+            border-right: 1px solid rgba(16,35,63,0.08);
+        }
+        section[data-testid="stSidebar"] .stTabs [data-baseweb="tab-list"] {
+            gap: 0.35rem;
+        }
+        section[data-testid="stSidebar"] .stTabs [data-baseweb="tab"] {
+            border-radius: 999px;
+            background: rgba(16,35,63,0.06);
+            padding: 0.35rem 0.75rem;
+            transition: all 0.2s ease;
+        }
+        section[data-testid="stSidebar"] .stTabs [aria-selected="true"] {
+            background: #10233F;
+            color: #F7F3EA;
+        }
+        section[data-testid="stSidebar"] div[role="radiogroup"] > label {
+            background: rgba(255,255,255,0.88);
+            border: 1px solid rgba(16,35,63,0.12);
+            border-radius: 14px;
+            padding: 0.55rem 0.8rem;
+            margin-bottom: 0.45rem;
+            box-shadow: 0 8px 18px rgba(16,35,63,0.04);
+        }
+        section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) {
+            background: #10233F;
+            border-color: #10233F;
+        }
+        section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) * {
+            color: #F7F3EA !important;
+        }
+        .station-card {
+            border: 1px solid rgba(16,35,63,0.12);
+            border-radius: 20px;
+            padding: 0.85rem 0.95rem;
+            background: rgba(255,255,255,0.74);
+            box-shadow: 0 10px 24px rgba(16,35,63,0.05);
+            min-height: 118px;
+            transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+        }
+        .station-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 14px 28px rgba(16,35,63,0.10);
+            border-color: rgba(16,35,63,0.24);
+        }
+        .station-card-title {
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: #10233F;
+            margin-bottom: 0.2rem;
+        }
+        .station-card-meta {
+            font-size: 0.92rem;
+            color: #5B6678;
+            margin-bottom: 0.45rem;
+        }
+        .station-card-state {
+            display: inline-block;
+            border-radius: 999px;
+            padding: 0.18rem 0.5rem;
+            font-size: 0.85rem;
+            font-weight: 700;
+            color: white;
+            margin-bottom: 0.45rem;
+        }
+        .station-card-copy {
+            font-size: 0.92rem;
+            color: #22324B;
+            line-height: 1.35;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -249,6 +320,7 @@ def _load_demo_stream() -> dict | None:
             rows.append(row)
         buffer_history = pd.DataFrame(rows)
     health_history = pd.read_csv(DEMO_DIR / "health_log.csv")
+    sensor_history = pd.read_csv(DEMO_DIR / "sensor_log.csv")
     registry = pd.read_csv(DEMO_DIR / "station_registry.csv")
     line_stats = pd.read_csv(DEMO_DIR / "station_stats.csv")
     with open(DEMO_DIR / "bottleneck_report.json") as fh:
@@ -270,6 +342,7 @@ def _load_demo_stream() -> dict | None:
         "registry": registry,
         "line_events": line_events,
         "health_history": health_history,
+        "sensor_history": sensor_history,
         "buffer_history": buffer_history,
         "timeline_min": timeline_min,
         "timeline_max": timeline_max,
@@ -444,6 +517,18 @@ def _virtual_sensor_history(state: dict, station: int, t_now: float, window_s: f
     ].copy().sort_values("t_global")
 
 
+def _virtual_sensor_observations(state: dict, station: int, t_now: float, window_s: float) -> pd.DataFrame:
+    sensor_history = state.get("sensor_history", pd.DataFrame())
+    if sensor_history is None or sensor_history.empty:
+        return pd.DataFrame()
+    start_t = max(float(state["timeline_min"]), float(t_now) - float(window_s))
+    return sensor_history[
+        (sensor_history["station"] == station)
+        & (sensor_history["t_global"] >= start_t)
+        & (sensor_history["t_global"] <= t_now)
+    ].copy().sort_values("t_global")
+
+
 def _virtual_sensor_station_choices(state: dict) -> list[int]:
     events = state.get("virtual_sensor_events", pd.DataFrame())
     if events is None or events.empty or "station" not in events.columns:
@@ -496,37 +581,114 @@ def _virtual_sensor_confidence_fig(vhist: pd.DataFrame) -> go.Figure:
 def _virtual_sensor_trend_fig(vhist: pd.DataFrame, t_now: float) -> go.Figure:
     if vhist.empty:
         return go.Figure()
-    plot_df = vhist.copy()
-    plot_df["channel_label"] = plot_df["channel"].str.title()
+    plot_df = vhist.copy().sort_values(["channel", "t_global"])
     color_map = {"torque": NAVY, "vibration": RED, "temperature": AMBER}
-    fig = px.line(
-        plot_df,
-        x="t_global",
-        y="estimate",
-        color="channel",
-        line_dash="method",
-        markers=True,
-        color_discrete_map=color_map,
-        labels={"t_global": "Simulation time (s)", "estimate": "Imputed value", "channel": "Channel"},
-    )
+    fig = go.Figure()
+    for channel, sub in plot_df.groupby("channel"):
+        fig.add_trace(
+            go.Scatter(
+                x=sub["t_global"],
+                y=sub["estimate"],
+                mode="lines+markers",
+                name=f"{channel} fill",
+                line=dict(color=color_map.get(channel, SLATE), width=3, shape="hv"),
+                marker=dict(size=7, color=color_map.get(channel, SLATE)),
+                customdata=np.stack([sub["method"], sub["confidence"]], axis=1),
+                hovertemplate=(
+                    "<b>%{fullData.name}</b><br>"
+                    "Filled value: %{y:.3f}<br>"
+                    "Passed forward at t=%{x:.1f}<br>"
+                    "Method: %{customdata[0]}<br>"
+                    "Confidence: %{customdata[1]:.2f}<extra></extra>"
+                ),
+            )
+        )
+
     fig.add_vline(x=t_now, line_color=GREEN, line_dash="dot", line_width=2)
-    fig.update_traces(
-        hovertemplate=(
-            "<b>%{fullData.name}</b><br>"
-            "Estimate: %{y:.3f}<br>"
-            "Updated at t=%{x:.1f}<br>"
-            "Method: %{customdata[0]}<br>"
-            "Confidence: %{customdata[1]:.2f}<extra></extra>"
-        ),
-        customdata=np.stack([plot_df["method"], plot_df["confidence"]], axis=1),
-    )
     fig.update_layout(
-        height=320,
+        height=340,
         margin=dict(t=20, b=0, l=0, r=0),
         legend_title_text="",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(size=15, color=SLATE),
+        xaxis_title="Simulation time (s)",
+        yaxis_title="Filled value carried into downstream logic",
+    )
+    return fig
+
+
+def _virtual_sensor_fill_flow_fig(vhist: pd.DataFrame, observed: pd.DataFrame, t_now: float) -> go.Figure:
+    fig = go.Figure()
+    if vhist.empty:
+        return fig
+
+    channel_order = ["torque", "vibration", "temperature"]
+    y_pos = {ch: idx for idx, ch in enumerate(channel_order)}
+    color_map = {"torque": NAVY, "vibration": RED, "temperature": AMBER}
+
+    for channel, sub in vhist.groupby("channel"):
+        y = y_pos.get(channel, len(y_pos))
+        fig.add_trace(
+            go.Scatter(
+                x=sub["t_global"],
+                y=[y] * len(sub),
+                mode="markers",
+                name=f"{channel} filled",
+                marker=dict(size=11, color=color_map.get(channel, SLATE), symbol="diamond"),
+                customdata=np.stack([sub["estimate"], sub["confidence"], sub["method"]], axis=1),
+                hovertemplate=(
+                    "<b>%{fullData.name}</b><br>"
+                    "Fill used at t=%{x:.1f}<br>"
+                    "Estimate: %{customdata[0]:.3f}<br>"
+                    "Confidence: %{customdata[1]:.2f}<br>"
+                    "Method: %{customdata[2]}<extra></extra>"
+                ),
+                showlegend=True,
+            )
+        )
+
+    if not observed.empty:
+        for channel, sub in observed.groupby("channel"):
+            y = y_pos.get(channel, len(y_pos))
+            fig.add_trace(
+                go.Scatter(
+                    x=sub["t_global"],
+                    y=[y] * len(sub),
+                    mode="markers",
+                    name=f"{channel} real check",
+                    marker=dict(
+                        size=14,
+                        color="white",
+                        symbol="circle-open",
+                        line=dict(color=color_map.get(channel, SLATE), width=3),
+                    ),
+                    customdata=np.stack([sub["value"]], axis=1),
+                    hovertemplate=(
+                        "<b>%{fullData.name}</b><br>"
+                        "Observed at t=%{x:.1f}<br>"
+                        "Real value: %{customdata[0]:.3f}<extra></extra>"
+                    ),
+                    showlegend=True,
+                )
+            )
+
+    fig.add_vline(x=t_now, line_color=GREEN, line_dash="dot", line_width=2)
+    fig.update_layout(
+        height=240,
+        margin=dict(t=20, b=0, l=0, r=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(size=15, color=SLATE),
+        xaxis_title="Simulation time (s)",
+        yaxis=dict(
+            title="Channel",
+            tickmode="array",
+            tickvals=list(y_pos.values()),
+            ticktext=[ch.title() for ch in y_pos.keys()],
+            range=[-0.6, max(y_pos.values()) + 0.6],
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
     )
     return fig
 
@@ -734,6 +896,294 @@ def _section_header(title: str, help_text: str, *, level: int = 3) -> None:
             st.markdown(help_text)
 
 
+def _state_badge(state_name: str) -> str:
+    return STATE_COLORS.get(state_name, GREY)
+
+
+def _station_events(state: dict, station: int, t_now: float, limit: int = 8) -> pd.DataFrame:
+    events = state["line_events"]
+    if events.empty:
+        return pd.DataFrame(columns=["t", "state", "buffer_in", "buffer_out"])
+    cols = ["t", "state", "buffer_in", "buffer_out"]
+    return (events[(events["station"] == station) & (events["t"] <= t_now)][cols]
+            .sort_values("t", ascending=False)
+            .head(limit)
+            .reset_index(drop=True))
+
+
+def _station_card_copy(row: pd.Series) -> str:
+    if row["state"] == DOWN:
+        return "Station is down and needs immediate inspection."
+    if row["state"] == BLOCKED:
+        return "Downstream congestion is preventing work from leaving this station."
+    if row["state"] == STARVED:
+        return "Upstream starvation is limiting this station right now."
+    if row["pressure"] >= 0.62:
+        return "Pressure is building and could turn into the next bottleneck."
+    return "Station is flowing normally with no strong operational warning."
+
+
+def _render_station_cards(snapshot: pd.DataFrame) -> int | None:
+    clicked_station = None
+    rows = [snapshot.iloc[i:i + 4] for i in range(0, len(snapshot), 4)]
+    for chunk in rows:
+        cols = st.columns(len(chunk))
+        for col, (_, row) in zip(cols, chunk.iterrows()):
+            with col:
+                st.markdown(
+                    (
+                        '<div class="station-card">'
+                        f'<div class="station-card-title">S{int(row["index"])} · {row["name"]}</div>'
+                        f'<div class="station-card-meta">{row["stage"]} · Tier {row["tier"]} · '
+                        f'Pressure {row["pressure"]:.2f}</div>'
+                        f'<div class="station-card-state" style="background:{_state_badge(row["state"])}">'
+                        f'{row["state"]}</div>'
+                        f'<div class="station-card-copy">{_station_card_copy(row)}</div>'
+                        "</div>"
+                    ),
+                    unsafe_allow_html=True,
+                )
+                if st.button(
+                    f"Open S{int(row['index'])}",
+                    key=f"open_station_{int(row['index'])}",
+                    use_container_width=True,
+                ):
+                    clicked_station = int(row["index"])
+    return clicked_station
+
+
+def _render_station_clickbar(snapshot: pd.DataFrame) -> int | None:
+    clicked_station = None
+    st.caption("Click a station below to open its full inspection view.")
+    rows = [snapshot.iloc[i:i + 6] for i in range(0, len(snapshot), 6)]
+    for chunk in rows:
+        cols = st.columns(len(chunk))
+        for col, (_, row) in zip(cols, chunk.iterrows()):
+            with col:
+                label = f"S{int(row['index'])} · {row['name']}"
+                if st.button(label, key=f"station_jump_{int(row['index'])}", use_container_width=True):
+                    clicked_station = int(row["index"])
+    return clicked_station
+
+
+def _dismiss_station_dialog() -> None:
+    st.session_state.station_modal_station = None
+
+
+@st.dialog("Station inspection", width="large", on_dismiss=_dismiss_station_dialog)
+def _station_detail_dialog(state: dict, snapshot: pd.DataFrame, station: int, t_now: float,
+                           window_s: float) -> None:
+    row = snapshot.loc[snapshot["index"] == station].iloc[0]
+    station_name = row["name"]
+    st.markdown(
+        f"""
+        <div class="ops-banner">
+          <h3>S{station} · {station_name}</h3>
+          <p>Detailed live inspection at t=<b>{int(t_now)}</b>s. This view expands the selected
+          station across the screen so you can narrate health drift, queue pressure, and inferred
+          evidence without leaving the main replay.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    m1, m2, m3, m4 = st.columns(4)
+    m1.markdown(_ops_card("Live state", row["state"], f"Tier {row['tier']} · {row['stage']}"),
+                unsafe_allow_html=True)
+    m2.markdown(_ops_card("Health", f"{row['health_true']:.2f}", "Current health estimate"),
+                unsafe_allow_html=True)
+    m3.markdown(_ops_card("Inbound queue", str(int(row["buffer_in"])), "Units waiting upstream"),
+                unsafe_allow_html=True)
+    m4.markdown(_ops_card("Pressure", f"{row['pressure']:.2f}", "Combined bottleneck signal"),
+                unsafe_allow_html=True)
+
+    top_left, top_right = st.columns([3, 2])
+    with top_left:
+        _section_header(
+            "Station timeline",
+            "This full-width detail chart follows the selected station through recent replay time, "
+            "combining health drift with inbound and outbound queue pressure.",
+        )
+        st.plotly_chart(_station_detail_fig(state, snapshot, station, t_now, window_s), width="stretch")
+    with top_right:
+        _section_header(
+            "Recent station events",
+            "These are the latest state changes recorded for the selected station only.",
+        )
+        station_events = _station_events(state, station, t_now)
+        if station_events.empty:
+            st.info("No station-specific events have occurred yet at this playback time.")
+        else:
+            st.dataframe(station_events, width="stretch", hide_index=True)
+
+    if station in _virtual_sensor_station_choices(state):
+        vfill = _virtual_sensor_snapshot(state, station, t_now)
+        vhist = _virtual_sensor_history(state, station, t_now, max(window_s, 900))
+        observed = _virtual_sensor_observations(state, station, t_now, max(window_s, 900))
+        lower_left, lower_right = st.columns([3, 2])
+        with lower_left:
+            _section_header(
+                "Virtual sensor fill for this station",
+                "This shows the inferred values that are being carried forward when direct readings are missing.",
+            )
+            if vhist.empty:
+                st.info("No virtual-sensor history is available for this station yet.")
+            else:
+                st.plotly_chart(_virtual_sensor_trend_fig(vhist, t_now), width="stretch")
+                st.plotly_chart(_virtual_sensor_fill_flow_fig(vhist, observed, t_now), width="stretch")
+        with lower_right:
+            _section_header(
+                "Inference confidence",
+                "Confidence helps decide whether the inferred evidence is strong enough for automation or should be escalated.",
+            )
+            if vfill.empty:
+                st.info("No virtual-sensor snapshot is available yet for this station.")
+            else:
+                st.plotly_chart(_virtual_sensor_confidence_fig(vhist), width="stretch")
+                st.dataframe(
+                    vfill[["channel", "method", "estimate", "confidence", "t_global"]].round(3),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+    if st.button("Close station detail", use_container_width=True):
+        st.session_state.station_modal_station = None
+        st.rerun()
+
+
+def _render_station_detail_workspace(state: dict, snapshot: pd.DataFrame, station: int,
+                                     t_now: float, window_s: float) -> None:
+    row = snapshot.loc[snapshot["index"] == station].iloc[0]
+    st.markdown(
+        f"""
+        <div class="ops-banner">
+          <h3>Station-wise Detail — S{station} · {row["name"]}</h3>
+          <p>Focused inspection view for the selected station at <b>{int(t_now)}</b>s.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    m1, m2, m3, m4 = st.columns(4)
+    m1.markdown(_ops_card("Live state", row["state"], f"Tier {row['tier']} · {row['stage']}"),
+                unsafe_allow_html=True)
+    m2.markdown(_ops_card("Health", f"{row['health_true']:.2f}", "Current simulated health"),
+                unsafe_allow_html=True)
+    m3.markdown(_ops_card("Inbound queue", str(int(row["buffer_in"])), "Units waiting upstream"),
+                unsafe_allow_html=True)
+    m4.markdown(_ops_card("Pressure", f"{row['pressure']:.2f}", "Combined bottleneck signal"),
+                unsafe_allow_html=True)
+
+    top_left, top_right = st.columns([3, 2])
+    with top_left:
+        _section_header(
+            "Station timeline",
+            "This chart shows health drift and buffer behavior for the chosen station across the selected time window.",
+        )
+        st.plotly_chart(_station_detail_fig(state, snapshot, station, t_now, window_s), width="stretch")
+    with top_right:
+        _section_header(
+            "Recent station events",
+            "These are the latest state changes recorded for the selected station only.",
+        )
+        station_events = _station_events(state, station, t_now)
+        if station_events.empty:
+            st.info("No station-specific events have occurred yet at this playback time.")
+        else:
+            st.dataframe(station_events, width="stretch", hide_index=True)
+
+    if station in _virtual_sensor_station_choices(state):
+        _section_header(
+            "Virtual sensor evidence for this station",
+            "If this station is sensor-poor, the inferred values and confidence are shown here as part of the station inspection.",
+        )
+        vfill = _virtual_sensor_snapshot(state, station, t_now)
+        vhist = _virtual_sensor_history(state, station, t_now, max(window_s, 900))
+        observed = _virtual_sensor_observations(state, station, t_now, max(window_s, 900))
+        lower_left, lower_right = st.columns([3, 2])
+        with lower_left:
+            if vhist.empty:
+                st.info("No virtual-sensor history is available for this station yet.")
+            else:
+                st.plotly_chart(_virtual_sensor_trend_fig(vhist, t_now), width="stretch")
+                st.plotly_chart(_virtual_sensor_fill_flow_fig(vhist, observed, t_now), width="stretch")
+        with lower_right:
+            if vfill.empty:
+                st.info("No virtual-sensor snapshot is available yet for this station.")
+            else:
+                st.plotly_chart(_virtual_sensor_confidence_fig(vhist), width="stretch")
+                st.dataframe(
+                    vfill[["channel", "method", "estimate", "confidence", "t_global"]].round(3),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+
+def _render_virtual_fill_workspace(state: dict, virtual_station: int, t_now: float, window_s: float) -> None:
+    inferred_stations = _virtual_sensor_station_choices(state)
+    station_lookup = state["line_stats"].set_index("index")["name"].to_dict()
+    st.markdown(
+        f"""
+        <div class="ops-banner">
+          <h3>Virtual Fill Workspace</h3>
+          <p>Focused view of inferred sensor behavior for <b>S{virtual_station} · {station_lookup.get(virtual_station, f"Station {virtual_station}")}</b>.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if not inferred_stations:
+        st.info("No virtual-sensor stations are available in the current replay.")
+        return
+
+    vfill = _virtual_sensor_snapshot(state, virtual_station, t_now)
+    vhist = _virtual_sensor_history(state, virtual_station, t_now, max(window_s, 900))
+    observed = _virtual_sensor_observations(state, virtual_station, t_now, max(window_s, 900))
+    control_left, control_right = st.columns([3, 2])
+    with control_left:
+        st.markdown(
+            _ops_card(
+                "Focused inferred station",
+                f"S{virtual_station} {station_lookup.get(virtual_station, f'Station {virtual_station}')}",
+                "Change this from the left navigation controls",
+            ),
+            unsafe_allow_html=True,
+        )
+    with control_right:
+        method_text = ", ".join(sorted(vfill["method"].dropna().unique().tolist())) if not vfill.empty else "waiting"
+        st.markdown(
+            _ops_card(
+                "Inference mode",
+                method_text.title(),
+                f"{len(vfill)} channel fills visible at t={int(t_now)}",
+            ),
+            unsafe_allow_html=True,
+        )
+
+    main_left, main_right = st.columns([3, 2])
+    with main_left:
+        _section_header(
+            f"Filled values passed downstream — S{virtual_station}",
+            "These are the inferred values that continue downstream whenever direct readings are missing.",
+        )
+        if vhist.empty:
+            st.info("No virtual-sensor history is available for this station at the current playback time.")
+        else:
+            st.plotly_chart(_virtual_sensor_trend_fig(vhist, t_now), width="stretch")
+            st.plotly_chart(_virtual_sensor_fill_flow_fig(vhist, observed, t_now), width="stretch")
+    with main_right:
+        _section_header(
+            "Confidence by channel",
+            "This shows how trustworthy each imputed channel is right now.",
+        )
+        if vfill.empty:
+            st.info("No virtual-sensor snapshot is available yet for this station.")
+        else:
+            st.plotly_chart(_virtual_sensor_confidence_fig(vhist), width="stretch")
+            fill_board = vfill[["channel", "method", "estimate", "confidence", "t_global"]].copy()
+            fill_board[["estimate", "confidence", "t_global"]] = (
+                fill_board[["estimate", "confidence", "t_global"]].round(3)
+            )
+            st.dataframe(fill_board, width="stretch", hide_index=True)
+
+
 def _build_state() -> dict:
     features, X, y, train_mask, test_mask = load_production_split()
     model = DefectModel().fit(X[train_mask], y[train_mask])
@@ -762,6 +1212,7 @@ def _build_state() -> dict:
             "registry": pd.read_csv(DATA_DIR / "station_registry.csv"),
             "line_events": pd.DataFrame(line.log),
             "health_history": pd.DataFrame(line.health_log),
+            "sensor_history": pd.DataFrame(line.sensor_log),
             "buffer_history": _buffer_history_frame(line),
             "timeline_min": float(min((r["t"] for r in line.buffer_log), default=0.0)),
             "timeline_max": float(max((r["t"] for r in line.buffer_log), default=DEFAULT_DEMO_DURATION)),
@@ -787,6 +1238,7 @@ def _build_state() -> dict:
         "n_defects": int(assessment["defect"].sum()),
         "line_events": demo_stream["line_events"],
         "health_history": demo_stream["health_history"],
+        "sensor_history": demo_stream["sensor_history"],
         "buffer_history": demo_stream["buffer_history"],
         "timeline_min": demo_stream["timeline_min"],
         "timeline_max": demo_stream["timeline_max"],
@@ -877,9 +1329,16 @@ def render_live_ops(state: dict, t_now: float, selected_station: int, window_s: 
         "Color shows live operating state, marker shape shows instrumentation tier, "
         "and node size grows with inbound queue pressure.",
     )
-    st.caption("Each node is one station in sequence. Bigger nodes mean more inbound queue. "
-               "The highlighted station is the one selected in the sidebar for detailed inspection.")
+    st.caption("Each node is one station in sequence. Bigger nodes mean more inbound queue.")
     st.plotly_chart(_station_strip_fig(snapshot, selected_station), width="stretch")
+    open_station = _render_station_clickbar(snapshot)
+    if open_station is None:
+        open_station = _render_station_cards(snapshot)
+    if open_station is not None:
+        st.session_state.pending_station_detail_picker = int(open_station)
+        st.session_state.station_modal_station = int(open_station)
+        selected_station = int(open_station)
+        st.rerun()
 
     left, right = st.columns([3, 2])
     with left:
@@ -948,137 +1407,30 @@ def render_live_ops(state: dict, t_now: float, selected_station: int, window_s: 
             })
             st.dataframe(board, width="stretch", hide_index=True)
 
-    lower_left, lower_right = st.columns([3, 2])
-    with lower_left:
-        picker_cols = st.columns([4, 2])
-        with picker_cols[0]:
-            selected_station = st.selectbox(
-                "Station detail",
-                options=list(state["line_stats"]["index"]),
-                index=list(state["line_stats"]["index"]).index(selected_station),
-                format_func=lambda i: (
-                    f"S{i} · "
-                    f"{state['line_stats'].loc[state['line_stats']['index'] == i, 'name'].iloc[0]}"
-                ),
-                key="station_detail_picker",
-            )
-        with picker_cols[1]:
-            window_s = st.select_slider(
-                "Detail window (s)",
-                options=[120, 240, 480, 900, 1500],
-                value=int(window_s),
-                key="station_window_picker",
-            )
-        _section_header(
-            f"Station detail — S{selected_station}",
-            "This chart zooms in on one station. The health line shows equipment or quality drift, "
-            "while the buffer overlays show whether work is piling up before or after the station.",
-        )
-        st.caption("The health line shows quality/equipment condition drift. The buffer overlays show "
-                   "whether this station is being overwhelmed upstream or blocked downstream.")
-        st.plotly_chart(_station_detail_fig(state, snapshot, selected_station, t_now, window_s),
-                        width="stretch")
-    with lower_right:
-        _section_header(
-            "Recent line events",
-            "This is the event feed for the replay. It records when stations entered working, blocked, "
-            "starved, or down states, together with the queue conditions at that moment.",
-        )
-        if recent.empty:
-            st.info("No events have occurred yet at this playback time.")
-        else:
-            recent_board = recent[["t", "station", "name", "state", "buffer_in", "buffer_out"]].copy()
-            recent_board = recent_board.rename(columns={
-                "t": "t",
-                "station": "S#",
-                "name": "Station",
-                "state": "State",
-                "buffer_in": "In",
-                "buffer_out": "Out",
-            })
-            st.dataframe(recent_board.sort_values("t", ascending=False), width="stretch", hide_index=True)
-            st.caption("This feed is useful during the demo to narrate exactly when stations moved "
-                       "into blocked, starved, working, or down states.")
-
-    inferred_stations = _virtual_sensor_station_choices(state)
-    default_virtual_station = selected_station if selected_station in inferred_stations else (
-        inferred_stations[0] if inferred_stations else selected_station
-    )
-    virtual_station = int(st.session_state.get("virtual_station_picker", default_virtual_station))
-    if virtual_station not in inferred_stations and inferred_stations:
-        virtual_station = inferred_stations[0]
-    vfill = _virtual_sensor_snapshot(state, virtual_station, t_now)
-    vhist = _virtual_sensor_history(state, virtual_station, t_now, max(window_s, 900))
-
-    st.divider()
     _section_header(
-        "Virtual sensor intelligence",
-        "This section is dedicated to stations where the twin must infer missing values. "
-        "It shows which station is being filled, how confidence changes, and how the imputed "
-        "channel values evolve during the replay.",
+        "Recent line events",
+        "This is the event feed for the replay. It records when stations entered working, blocked, "
+        "starved, or down states, together with the queue conditions at that moment.",
     )
-    station_lookup = state["line_stats"].set_index("index")["name"].to_dict()
-    control_left, control_right = st.columns([3, 2])
-    with control_left:
-        if inferred_stations:
-            virtual_station = st.selectbox(
-                "Virtual-sensor station",
-                options=inferred_stations,
-                index=inferred_stations.index(virtual_station),
-                format_func=lambda i: f"S{i} · {station_lookup.get(i, f'Station {i}')}",
-                key="virtual_station_picker",
-            )
-        else:
-            st.info("No virtual-sensor stations are available in the current replay.")
-    with control_right:
-        if inferred_stations:
-            method_text = ", ".join(sorted(vfill["method"].dropna().unique().tolist())) if not vfill.empty else "waiting"
-            st.markdown(
-                _ops_card(
-                    "Inference mode",
-                    method_text.title(),
-                    f"{len(vfill)} channel fills visible at t={int(t_now)}",
-                ),
-                unsafe_allow_html=True,
-            )
+    if recent.empty:
+        st.info("No events have occurred yet at this playback time.")
+    else:
+        recent_board = recent[["t", "station", "name", "state", "buffer_in", "buffer_out"]].copy()
+        recent_board = recent_board.rename(columns={
+            "t": "t",
+            "station": "S#",
+            "name": "Station",
+            "state": "State",
+            "buffer_in": "In",
+            "buffer_out": "Out",
+        })
+        st.dataframe(recent_board.sort_values("t", ascending=False), width="stretch", hide_index=True)
+        st.caption("This feed is useful during the demo to narrate exactly when stations moved "
+                   "into blocked, starved, working, or down states.")
 
-    if inferred_stations:
-        virtual_station = int(st.session_state.get("virtual_station_picker", virtual_station))
-        vfill = _virtual_sensor_snapshot(state, virtual_station, t_now)
-        vhist = _virtual_sensor_history(state, virtual_station, t_now, max(window_s, 900))
-        vleft, vright = st.columns([3, 2])
-        with vleft:
-            _section_header(
-                f"Imputed channel trends — S{virtual_station}",
-                "Each line is a channel whose value is being filled by the twin. "
-                "This makes the inferred sensor behavior visible over replay time instead of hiding it in a table.",
-            )
-            if vhist.empty:
-                st.info("No virtual-sensor history is available for this station at the current playback time.")
-            else:
-                st.plotly_chart(_virtual_sensor_trend_fig(vhist, t_now), width="stretch")
-        with vright:
-            _section_header(
-                "Confidence by channel",
-                "This shows how trustworthy each imputed channel is right now. "
-                "Low confidence should reduce automation and push decisions toward human review.",
-            )
-            if vfill.empty:
-                st.info("No virtual-sensor snapshot is available yet for this station.")
-            else:
-                st.plotly_chart(_virtual_sensor_confidence_fig(vhist), width="stretch")
-                fill_board = vfill[["channel", "method", "estimate", "confidence", "t_global"]].copy()
-                fill_board[["estimate", "confidence", "t_global"]] = (
-                    fill_board[["estimate", "confidence", "t_global"]].round(3)
-                )
-                fill_board = fill_board.rename(columns={
-                    "channel": "Channel",
-                    "method": "Method",
-                    "estimate": "Estimate",
-                    "confidence": "Confidence",
-                    "t_global": "Updated at t",
-                })
-                st.dataframe(fill_board, width="stretch", hide_index=True)
+    modal_station = st.session_state.get("station_modal_station")
+    if modal_station is not None:
+        _station_detail_dialog(state, snapshot, int(modal_station), t_now, window_s)
     return int(selected_station), float(window_s)
 
 
@@ -1245,6 +1597,108 @@ def _init_playback(state: dict) -> None:
     st.session_state.live_t = int(np.clip(st.session_state.live_t, tmin, tmax))
 
 
+def _consume_pending_station_selection() -> None:
+    pending_station = st.session_state.pop("pending_station_detail_picker", None)
+    if pending_station is not None:
+        st.session_state.station_detail_picker = int(pending_station)
+
+
+def _render_sidebar(state: dict) -> tuple[str, str, float, int, bool, bool]:
+    tmin = int(state["timeline_min"])
+    tmax = int(state["timeline_max"])
+    stations = list(state["line_stats"]["index"])
+    inferred_stations = _virtual_sensor_station_choices(state)
+
+    with st.sidebar:
+        st.markdown("## Control Deck")
+        st.caption("Use the left navigation boxes to switch between the main workspaces.")
+        workspace = st.radio(
+            "Workspace",
+            ["Live View", "Station-wise Detail", "Virtual Fill", "Analytics"],
+            key="workspace_nav",
+            label_visibility="collapsed",
+        )
+
+        with st.expander("Playback Controls", expanded=True):
+            autoplay = st.checkbox("Auto-play live replay", value=False, key="autoplay_toggle")
+            loop = st.checkbox("Loop at end", value=True, key="loop_toggle")
+            playback_step = st.select_slider(
+                "Jump per refresh (s)",
+                options=[5, 10, 15, 20, 30, 45, 60],
+                value=int(st.session_state.get("playback_step_top", 20)),
+                key="playback_step_top",
+            )
+            refresh_ms = st.select_slider(
+                "Refresh cadence (ms)",
+                options=[500, 800, 1200, 1600, 2200],
+                value=int(st.session_state.get("refresh_ms_top", 1200)),
+                key="refresh_ms_top",
+            )
+            live_t = st.slider("Simulation time (s)", tmin, tmax, int(st.session_state.live_t), step=5)
+            st.session_state.live_t = live_t
+            st.markdown(_ops_card("Replay source", "demo replay", state["demo_source"]), unsafe_allow_html=True)
+
+        with st.expander("Analysis Controls", expanded=True):
+            persona = st.radio("Persona", ["Supervisor", "Manager", "Leadership"], key="persona_top")
+            trust_thr = st.slider(
+                "Auto-act only above this Effective Trust",
+                0.0,
+                1.0,
+                float(st.session_state.get("trust_thr_sidebar", 0.5)),
+                0.05,
+                key="trust_thr_sidebar",
+                help="Lower = more automation. Higher = more escalated to people.",
+            )
+            selected_station = st.selectbox(
+                "Default station focus",
+                options=stations,
+                index=stations.index(int(st.session_state.get("station_detail_picker", stations[0]))),
+                format_func=lambda i: (
+                    f"S{i} · "
+                    f"{state['line_stats'].loc[state['line_stats']['index'] == i, 'name'].iloc[0]}"
+                ),
+                key="station_detail_picker",
+            )
+            window_s = st.select_slider(
+                "Detail window (s)",
+                options=[120, 240, 480, 900, 1500],
+                value=int(st.session_state.get("station_window_picker", 480)),
+                key="station_window_picker",
+            )
+            st.markdown(
+                _ops_card("Held-out AUC", f"{state['held_out_auc']:.2f}", f"{state['n_defects']} held-out defects"),
+                unsafe_allow_html=True,
+            )
+
+        with st.expander("Virtual Sensor Focus", expanded=(workspace == "Virtual Fill")):
+            if inferred_stations:
+                default_virtual_station = int(st.session_state.get("virtual_station_picker", inferred_stations[0]))
+                if default_virtual_station not in inferred_stations:
+                    default_virtual_station = inferred_stations[0]
+                st.selectbox(
+                    "Virtual-sensor station",
+                    options=inferred_stations,
+                    index=inferred_stations.index(default_virtual_station),
+                    format_func=lambda i: (
+                        f"S{i} · "
+                        f"{state['line_stats'].loc[state['line_stats']['index'] == i, 'name'].iloc[0]}"
+                    ),
+                    key="virtual_station_picker",
+                )
+                st.caption("Only stations that truly use imputed values appear here.")
+            else:
+                st.info("No inferred stations are available in this replay.")
+
+    return (
+        str(st.session_state.get("workspace_nav", "Live View")),
+        str(st.session_state.get("persona_top", "Supervisor")),
+        float(st.session_state.get("trust_thr_sidebar", 0.5)),
+        int(st.session_state.get("playback_step_top", 20)),
+        bool(st.session_state.get("autoplay_toggle", False)),
+        bool(st.session_state.get("loop_toggle", True)),
+    )
+
+
 def main() -> None:
     st.set_page_config(page_title="DigitalTwin.ai", page_icon="🏭", layout="wide")
     _inject_theme()
@@ -1253,61 +1707,47 @@ def main() -> None:
 
     state = get_state()
     _init_playback(state)
+    _consume_pending_station_selection()
     tmin = int(state["timeline_min"])
     tmax = int(state["timeline_max"])
-
-    _section_header(
-        "Top Controls",
-        "These controls drive the whole dashboard. Playback controls move the live replay, "
-        "persona changes the lower analytical lens, and the trust threshold changes whether high-risk "
-        "units are auto-acted or escalated to a human.",
-        level=2,
-    )
-    top1, top2, top3, top4 = st.columns([1.2, 1.4, 1.6, 1.4])
-    with top1:
-        persona = st.radio("Persona", ["Supervisor", "Manager", "Leadership"], key="persona_top")
-        autoplay = st.checkbox("Auto-play live replay", value=False)
-        loop = st.checkbox("Loop at end", value=True)
-    with top2:
-        playback_step = st.select_slider(
-            "Jump per refresh (s)",
-            options=[5, 10, 15, 20, 30, 45, 60],
-            value=20,
-            key="playback_step_top",
-        )
-        refresh_ms = st.select_slider(
-            "Refresh cadence (ms)",
-            options=[500, 800, 1200, 1600, 2200],
-            value=1200,
-            key="refresh_ms_top",
-        )
-    with top3:
-        live_t = st.slider("Simulation time (s)", tmin, tmax, int(st.session_state.live_t), step=5)
-        st.session_state.live_t = live_t
-        trust_thr = st.slider(
-            "Auto-act only above this Effective Trust", 0.0, 1.0, 0.5, 0.05,
-            help="Lower = more automation. Higher = more escalated to people."
-        )
-    with top4:
-        st.markdown(_ops_card("Held-out AUC", f"{state['held_out_auc']:.2f}",
-                              f"{state['n_defects']} held-out defects"), unsafe_allow_html=True)
-        st.markdown(_ops_card("Live stream source", "demo replay",
-                              state["demo_source"]), unsafe_allow_html=True)
+    workspace, persona, trust_thr, playback_step, autoplay, loop = _render_sidebar(state)
+    refresh_ms = int(st.session_state.get("refresh_ms_top", 1200))
 
     a = regate(state["assessment"], state["risk_thr"], trust_thr)
     selected_station = int(st.session_state.get("station_detail_picker", int(state["line_stats"]["index"].iloc[0])))
     window_s = float(st.session_state.get("station_window_picker", 480))
-    selected_station, window_s = render_live_ops(
-        state, float(st.session_state.live_t), selected_station, window_s
-    )
+    t_now = float(st.session_state.live_t)
 
-    st.divider()
-    if persona == "Supervisor":
-        render_supervisor(state, a)
-    elif persona == "Manager":
-        render_manager(state, a)
+    if workspace == "Live View":
+        selected_station, window_s = render_live_ops(state, t_now, selected_station, window_s)
+    elif workspace == "Station-wise Detail":
+        snapshot = _line_snapshot(state, t_now)
+        _render_station_detail_workspace(state, snapshot, selected_station, t_now, window_s)
+    elif workspace == "Virtual Fill":
+        inferred_stations = _virtual_sensor_station_choices(state)
+        virtual_station = int(st.session_state.get(
+            "virtual_station_picker",
+            inferred_stations[0] if inferred_stations else selected_station,
+        ))
+        if inferred_stations and virtual_station not in inferred_stations:
+            virtual_station = inferred_stations[0]
+        _render_virtual_fill_workspace(state, virtual_station, t_now, window_s)
     else:
-        render_leadership(state, a)
+        st.markdown(
+            """
+            <div class="ops-banner">
+              <h3>Analytics Workspace</h3>
+              <p>Switch the persona in the left controls to move between operator, manager, and leadership lenses.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if persona == "Supervisor":
+            render_supervisor(state, a)
+        elif persona == "Manager":
+            render_manager(state, a)
+        else:
+            render_leadership(state, a)
 
     if autoplay:
         nxt = int(st.session_state.live_t) + int(playback_step)
