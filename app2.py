@@ -72,7 +72,14 @@ def inject_theme() -> None:
         @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Manrope:wght@400;500;600;700&display=swap');
         :root { --navy:#0b1728; --ink:#15233a; --paper:#f4f1e9; --teal:#0e9384; --amber:#e99b26; --red:#d45454; }
         html { scroll-behavior: smooth; }
-        body, [class*="st-"] { font-family: "Manrope", sans-serif; color: var(--ink); }
+        body, .stApp, [data-testid="stSidebar"], [data-testid="stMainBlockContainer"] {
+          font-family: "Manrope", sans-serif; color: var(--ink);
+        }
+        p, label, li, div, span, button, input, textarea, select { font-family: inherit; }
+        .material-symbols-rounded, [data-testid="stIconMaterial"] {
+          font-family: "Material Symbols Rounded" !important;
+        }
+        .material-icons { font-family: "Material Icons" !important; }
         .stApp { background:
           radial-gradient(circle at 7% 0%, rgba(14,147,132,.12), transparent 25rem),
           radial-gradient(circle at 96% 8%, rgba(233,155,38,.12), transparent 24rem),
@@ -160,9 +167,11 @@ def inject_theme() -> None:
           background:rgba(255,253,248,.82); color:#667286; font-size:.72rem; line-height:1.45; }
         .llm-step strong { display:block; color:#10233a; font-family:"Barlow Condensed",sans-serif;
           font-size:1.05rem; margin-bottom:.12rem; }
-        .alert { display:grid; grid-template-columns:75px 80px 1fr 95px; gap:.6rem; align-items:center; padding:.56rem .7rem;
+        .alert { display:grid; grid-template-columns:75px 80px minmax(180px,1fr) 95px 105px; gap:.6rem; align-items:center; padding:.56rem .7rem;
           border-bottom:1px solid rgba(11,23,40,.07); font-size:.78rem; }
         .alert:last-child { border-bottom:0; }
+        .workflow-pill { display:inline-block; border-radius:7px; background:#e9ecea; color:#536174; font-size:.6rem;
+          font-weight:700; letter-spacing:.04em; padding:.24rem .38rem; text-align:center; white-space:nowrap; }
         .persona-card { border-radius:18px; padding:1rem; height:100%; }
         .persona-card h3 { margin:.2rem 0 .5rem; }
         .empty-honest { border:1px dashed #aeb6c0; border-radius:16px; padding:1rem; color:#687486; background:rgba(255,255,255,.45); }
@@ -311,24 +320,50 @@ def _coverage_for_station(data: dict[str, Any], station: int, t_now: float) -> d
     return {"coverage_status": status, "sensor_coverage": coverage, "coverage_confidence": confidence}
 
 
+def _observable_condition(sensor_log: pd.DataFrame, snapshot: pd.DataFrame,
+                          t_now: float) -> pd.Series:
+    """Estimate station condition using only evidence visible by ``t_now``."""
+    scores: dict[int, float] = {}
+    visible = sensor_log[sensor_log["t"] <= t_now] if not sensor_log.empty else sensor_log
+    for _, row in snapshot.iterrows():
+        station = int(row["index"])
+        station_log = visible[
+            (visible["station"] == station) & visible["channel"].isin(EXPECTED_CHANNELS)
+        ]
+        shifts: list[float] = []
+        for _, channel_log in station_log.groupby("channel"):
+            baseline = channel_log[channel_log["t"] < t_now - 300]["value"].tail(180)
+            recent = channel_log[channel_log["t"] >= t_now - 300]["value"]
+            if len(baseline) < 8 or recent.empty:
+                continue
+            scale = float(baseline.std())
+            if not np.isfinite(scale) or scale <= 1e-9:
+                continue
+            shifts.append(abs(float(recent.median()) - float(baseline.median())) / scale)
+        sensor_shift = min(1.0, float(np.mean(shifts)) / 3.0) if shifts else 0.0
+        cycle_drift = min(1.0, max(0.0, float(row.get("cycle_drift", 0.0))))
+        downtime = min(1.0, max(0.0, float(row.get("down_live", 0.0))))
+        condition = 1.0 - 0.45 * sensor_shift - 0.35 * cycle_drift - 1.5 * downtime
+        if str(row.get("state")) == "DOWN":
+            condition = min(condition, 0.15)
+        scores[station] = float(np.clip(condition, 0.05, 1.0))
+    return snapshot["index"].map(scores).astype(float)
+
+
 def get_live_state(data: dict[str, Any], t_now: float) -> dict[str, Any]:
     stats = data["station_stats"].copy().sort_values("index")
     stations = [int(v) for v in stats["index"]]
     events = data["line_events"]
-    health = data["health_log"]
     buffers = data["buffer_history"]
     visits = data["unit_visit_times"]
     assessments = data["demo_assessment"]
     t_min = float(buffers["t"].min()) if not buffers.empty else 0.0
 
     latest_event = _latest_by(events, t_now, "station")
-    latest_health = _latest_by(health, t_now, "station")
     duration = _state_durations(events, stations, t_now, t_min)
     snapshot = stats.merge(duration, left_on="index", right_on="station", how="left").drop(columns=["station"])
     snapshot = snapshot.merge(latest_event[["station", "state"]], left_on="index", right_on="station", how="left").drop(columns=["station"])
-    snapshot = snapshot.merge(latest_health[["station", "health_true"]], left_on="index", right_on="station", how="left").drop(columns=["station"])
     snapshot["state"] = snapshot["state"].fillna("STARTUP")
-    snapshot["health_true"] = snapshot["health_true"].fillna(1.0)
 
     buffer_row = buffers[buffers["t"] <= t_now].tail(1)
     current_visits = visits[visits["t_global"] <= t_now].sort_values("t_global").groupby("station", as_index=False).tail(1) if not visits.empty else visits
@@ -346,10 +381,12 @@ def get_live_state(data: dict[str, Any], t_now: float) -> dict[str, Any]:
         for key, value in coverage.items():
             snapshot.loc[idx, key] = value
 
+    snapshot["health_estimate"] = _observable_condition(data["sensor_log"], snapshot, t_now)
+
     state_map = {"WORKING": "RUNNING", "BLOCKED": "BLOCKED", "STARVED": "STARVED", "DOWN": "FAULT", "STARTUP": "STARTUP"}
     snapshot["display_state"] = snapshot["state"].map(state_map).fillna("IDLE")
-    snapshot.loc[(snapshot["health_true"] < .82) & (snapshot["display_state"] == "RUNNING"), "display_state"] = "DEGRADED"
-    snapshot.loc[(snapshot["health_true"] < .9) & (snapshot["display_state"] == "RUNNING"), "display_state"] = "WARNING"
+    snapshot.loc[(snapshot["health_estimate"] < .82) & (snapshot["display_state"] == "RUNNING"), "display_state"] = "DEGRADED"
+    snapshot.loc[(snapshot["health_estimate"] < .9) & (snapshot["display_state"] == "RUNNING"), "display_state"] = "WARNING"
     snapshot["queue_pressure"] = (snapshot["buffer_in"] / max(1, capacity)).clip(0, 1)
     downstream_starve = []
     for _, row in snapshot.iterrows():
@@ -361,7 +398,7 @@ def get_live_state(data: dict[str, Any], t_now: float) -> dict[str, Any]:
     snapshot["live_score"] = (
         snapshot["util_live"].fillna(0) + snapshot["blocked_live"].fillna(0)
         - snapshot["starved_live"].fillna(0) + 1.5 * snapshot["downstream_starve"]
-        + .12 * (1 - snapshot["health_true"])
+        + .12 * (1 - snapshot["health_estimate"])
     )
 
     visible_assessments = assessments[assessments["latest_t"] <= t_now].copy() if not assessments.empty else assessments.copy()
@@ -390,7 +427,7 @@ def get_live_state(data: dict[str, Any], t_now: float) -> dict[str, Any]:
     throughput_window = max(300.0, min(900.0, t_now - t_min))
     recent_completed = visits[(visits["station"] == last_station) & (visits["t_global"] <= t_now) & (visits["t_global"] >= t_now - throughput_window)] if not visits.empty else visits
     throughput = len(recent_completed) * 3600.0 / throughput_window
-    degraded = int((snapshot["health_true"] < .82).sum())
+    degraded = int((snapshot["health_estimate"] < .82).sum())
     high_risk_count = int(visible_assessments.get("high_risk", pd.Series(dtype=bool)).sum())
     current_queue_is_constraint = int(current_bn["index"]) > min(stations) and current_bn["queue_pressure"] >= .9
     line_status = "CRITICAL" if degraded or current_queue_is_constraint else "WATCH" if high_risk_count or emerging is not None else "STABLE"
@@ -398,7 +435,7 @@ def get_live_state(data: dict[str, Any], t_now: float) -> dict[str, Any]:
         "units_completed": len(completed_ids), "throughput": throughput,
         "wip": len(started_ids - completed_ids), "current_bottleneck": f"S{int(current_bn['index']):02d}",
         "high_risk_units": high_risk_count, "degraded_stations": degraded,
-        "average_health": float(snapshot["health_true"].mean()), "line_status": line_status,
+        "average_health": float(snapshot["health_estimate"].mean()), "line_status": line_status,
     }
     return {
         "timestamp": t_now, "snapshot": snapshot, "assessments": visible_assessments,
@@ -456,13 +493,13 @@ def render_kpis(live: dict[str, Any]) -> None:
     k = live["kpis"]
     status_color = GREEN if k["line_status"] == "STABLE" else AMBER if k["line_status"] == "WATCH" else RED
     cards = [
-        ("Units completed", str(k["units_completed"]), "Observed at output by now", TEAL),
+        ("Production units completed", str(k["units_completed"]), "Observed at output by now", TEAL),
         ("Throughput", f'{k["throughput"]:.1f}/h', "Rolling output rate", CYAN),
-        ("Work in progress", str(k["wip"]), "Started minus completed", AMBER),
+        ("Work in progress", str(k["wip"]), "Production units started minus completed", AMBER),
         ("Current bottleneck", k["current_bottleneck"], "Highest live constraint score", RED),
-        ("High-risk units", str(k["high_risk_units"]), "Model results available by now", RED),
-        ("Degraded stations", str(k["degraded_stations"]), "Health below 82%", AMBER),
-        ("Average health", f'{k["average_health"]:.0%}', "Across current station states", GREEN),
+        ("High-risk production units", str(k["high_risk_units"]), "Model results available by now", RED),
+        ("Degraded stations", str(k["degraded_stations"]), "Condition estimate below 82%", AMBER),
+        ("Average condition estimate", f'{k["average_health"]:.0%}', "Observable as-of proxy", GREEN),
         ("Line status", k["line_status"], "Live operational posture", status_color),
     ]
     st.markdown(
@@ -489,7 +526,7 @@ def render_live_pipeline(live: dict[str, Any]) -> None:
             station = int(row["index"])
             state = str(row["display_state"])
             color = STATE_COLORS.get(state, MUTED)
-            current = "No active unit" if pd.isna(row["current_unit"]) or state in {"STARTUP", "IDLE"} else f'U{int(row["current_unit"]):03d} in process'
+            current = "No active production unit" if pd.isna(row["current_unit"]) or state in {"STARTUP", "IDLE"} else f'Production Unit U{int(row["current_unit"]):03d}'
             cycle = "waiting" if pd.isna(row["cycle_time"]) else f'{row["cycle_time"]:.1f}s'
             risk = min(1.0, float(row["live_score"]) / 1.8)
             cards.append(
@@ -498,7 +535,7 @@ def render_live_pipeline(live: dict[str, Any]) -> None:
                 f'<span class="state-pill" style="background:{color}">{state}</span></div>'
                 f'<div class="station-unit">{current}</div><div class="station-grid">'
                 f'<span>UTILIZATION<strong>{row["util_live"]:.0%}</strong></span>'
-                f'<span>HEALTH<strong>{row["health_true"]:.0%}</strong></span>'
+                f'<span>CONDITION<strong>{row["health_estimate"]:.0%}</strong></span>'
                 f'<span>CYCLE<strong>{cycle}</strong></span>'
                 f'<span>BUFFER<strong>{int(row["buffer_in"])}/{capacity}</strong></span>'
                 f'<span>COVERAGE<strong>{row["sensor_coverage"]:.0%}</strong></span>'
@@ -518,7 +555,7 @@ def render_live_pipeline(live: dict[str, Any]) -> None:
             )
     st.markdown(
         '<div class="buffer-row"><b>FINAL OUTPUT</b><div class="buffer-line"><i class="flow-dot"></i></div>'
-        f'<span>{live["kpis"]["units_completed"]} completed units observed</span></div>',
+        f'<span>{live["kpis"]["units_completed"]} completed production units observed</span></div>',
         unsafe_allow_html=True,
     )
 
@@ -548,15 +585,45 @@ def render_alerts(alerts: list[dict[str, Any]]) -> None:
         st.markdown('<div class="empty-honest">No alert condition is supported by the data at this playback time.</div>', unsafe_allow_html=True)
         return
     colors = {"CRITICAL": RED, "HIGH": RED, "WARNING": AMBER, "INFO": CYAN}
+    workflow = st.session_state.setdefault("alert_workflow", {})
     rows = []
     for item in alerts:
+        alert_id = f'{item["source"]}|{item["severity"]}|{item["message"]}'
+        record = workflow.get(alert_id, {"status": "NEW", "owner": "Unassigned"})
         stamp = time.strftime("%H:%M:%S", time.gmtime(float(item["t"])))
         color = colors[item["severity"]]
         rows.append(
             f'<div class="alert"><b>{stamp}</b><b>{item["source"]}</b><span>{item["message"]}</span>'
-            f'<span class="severity-pill" style="background:{color}">{item["severity"]}</span></div>'
+            f'<span class="severity-pill" style="background:{color}">{item["severity"]}</span>'
+            f'<span class="workflow-pill" title="{record["owner"]}">{record["status"]}</span></div>'
         )
     st.markdown(f'<div class="panel">{"".join(rows)}</div>', unsafe_allow_html=True)
+
+    alert_ids = [f'{item["source"]}|{item["severity"]}|{item["message"]}' for item in alerts]
+    alert_lookup = dict(zip(alert_ids, alerts))
+    selected = st.selectbox(
+        "Manage alert",
+        alert_ids,
+        format_func=lambda key: f'{alert_lookup[key]["source"]} · {alert_lookup[key]["message"]}',
+        key="managed_alert",
+    )
+    current = workflow.get(selected, {"status": "NEW", "owner": "Unassigned"})
+    control_left, control_right = st.columns([.55, .45])
+    with control_left:
+        owner = st.selectbox(
+            "Assign to",
+            ["Unassigned", "Line Supervisor", "Quality", "Maintenance"],
+            index=["Unassigned", "Line Supervisor", "Quality", "Maintenance"].index(current["owner"]),
+            key=f"alert_owner_{selected}",
+        )
+    with control_right:
+        st.caption(f'Current status: {current["status"]}')
+    actions = st.columns(3)
+    for column, label, status in zip(actions, ["Acknowledge", "Under review", "Resolve"], ["ACKNOWLEDGED", "UNDER REVIEW", "RESOLVED"]):
+        with column:
+            if st.button(label, key=f"alert_{status}_{selected}", width="stretch"):
+                workflow[selected] = {"status": status, "owner": owner}
+                st.rerun()
 
 
 def _sensor_baseline(unit_log: pd.DataFrame, t_now: float) -> pd.DataFrame:
@@ -586,9 +653,9 @@ def trace_unit(data: dict[str, Any], live: dict[str, Any], unit_id: int) -> dict
     if not abnormal and not path.empty:
         visited = live["snapshot"][live["snapshot"]["index"].isin(path["station"])]
         if not visited.empty:
-            weakest = visited.sort_values("health_true").iloc[0]
+            weakest = visited.sort_values("health_estimate").iloc[0]
             suspect = int(weakest["index"])
-            abnormal = [f'S{suspect:02d} health is lowest on the observed path ({weakest["health_true"]:.0%})']
+            abnormal = [f'S{suspect:02d} condition estimate is lowest on the path ({weakest["health_estimate"]:.0%})']
     return {"path": path, "suspected_origin": suspect, "abnormal_signals": abnormal}
 
 
@@ -608,58 +675,108 @@ def _unit_path_html(path: pd.DataFrame, suspect: int | None, total_stations: int
     return '<div style="display:flex;gap:.45rem;flex-wrap:wrap;font-size:.75rem">' + '<span style="color:#a4abb4">→</span>'.join(items) + '</div>'
 
 
+def _recommended_unit_action(row: pd.Series, suspect: int | None, risk_thr: float) -> tuple[str, str, str]:
+    unit = f'U{int(row["unit_id"]):03d}'
+    risk = float(row["risk_score"])
+    trust = float(row["effective_trust"])
+    origin = f" and inspect S{suspect:02d}" if suspect is not None else ""
+    if risk >= risk_thr and trust < .5:
+        return (
+            "Manual quality hold",
+            f"Route Production Unit {unit} to human verification{origin} before release.",
+            f"Risk is above the operating threshold, but Effective Trust is only {trust:.0%}; automatic action is not supported.",
+        )
+    if risk >= risk_thr:
+        return (
+            "Quality hold",
+            f"Hold Production Unit {unit} for targeted inspection{origin}.",
+            f"Risk is above the operating threshold and Effective Trust clears the automation gate at {trust:.0%}.",
+        )
+    if trust < .5:
+        return (
+            "Continue with monitoring",
+            f"Allow Production Unit {unit} to continue while preserving enhanced monitoring{origin}.",
+            f"Risk is below the hold threshold, but Effective Trust is {trust:.0%}; the evidence remains too weak for a confident pass.",
+        )
+    return (
+        "Standard flow",
+        f"Allow Production Unit {unit} to continue under normal quality controls.",
+        f"Risk is below the operating threshold and Effective Trust is {trust:.0%}.",
+    )
+
+
 def render_defects(data: dict[str, Any], live: dict[str, Any]) -> None:
     assessment = live["assessments"]
     if assessment.empty:
-        st.markdown('<div class="empty-honest">No unit prediction has become available yet. Predictions appear only after sufficient unit evidence reaches the model.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="empty-honest">No production-unit prediction has become available yet. Predictions appear only after sufficient production evidence reaches the model.</div>', unsafe_allow_html=True)
         return
     top = assessment.sort_values("risk_score", ascending=False).head(6)
     risk_thr = live["risk_threshold"]
     left, right = st.columns([1.08, .92])
     with left:
+        trust_thr = float(assessment.get("trust_threshold", pd.Series([.5])).iloc[0])
+        matrix_units = assessment.sort_values("risk_score", ascending=False).head(30)
         fig = px.scatter(
-            top, x="effective_trust", y="risk_score", size="model_confidence", color="action",
-            hover_name=top["unit_id"].map(lambda value: f"Unit U{int(value):03d}"),
+            matrix_units, x="effective_trust", y="risk_score", size="model_confidence", color="action",
+            hover_name=matrix_units["unit_id"].map(lambda value: f"Production Unit U{int(value):03d}"),
             color_discrete_map=ACTION_COLORS,
-            labels={"effective_trust": "Effective trust", "risk_score": "Defect risk", "model_confidence": "Model confidence"},
+            labels={"effective_trust": "Effective Trust", "risk_score": "Defect risk", "model_confidence": "Model confidence"},
         )
+        quadrants = [
+            (0, trust_thr, 0, risk_thr, "rgba(43,143,184,.08)", "MONITOR"),
+            (trust_thr, 1, 0, risk_thr, "rgba(77,158,115,.09)", "PASS"),
+            (0, trust_thr, risk_thr, 1, "rgba(233,155,38,.10)", "HUMAN-VERIFY"),
+            (trust_thr, 1, risk_thr, 1, "rgba(212,84,84,.09)", "AUTO-ACT"),
+        ]
+        for x0, x1, y0, y1, fill, label in quadrants:
+            fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, fillcolor=fill, line_width=0, layer="below")
+            fig.add_annotation(x=(x0 + x1) / 2, y=(y0 + y1) / 2, text=f"<b>{label}</b>", showarrow=False, opacity=.45, font_size=11)
         fig.add_hline(
             y=risk_thr, line_dash="dash", line_color=RED,
             annotation_text="High-risk threshold", annotation_position="bottom left",
             annotation_font_color=RED, annotation_font_size=11,
         )
         fig.add_vline(
-            x=.5, line_dash="dot", line_color=AMBER,
+            x=trust_thr, line_dash="dot", line_color=AMBER,
             annotation_text="Human / auto gate", annotation_position="bottom right",
             annotation_font_color="#9b6414", annotation_font_size=11,
         )
         fig.update_traces(marker=dict(opacity=.82, line=dict(width=1, color="rgba(11,23,40,.25)")))
         fig.update_layout(
-            height=390, margin=dict(l=20, r=15, t=70, b=20),
+            title="Risk × Effective Trust decision matrix", height=430, margin=dict(l=20, r=15, t=85, b=20),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(255,253,248,.65)",
+            xaxis=dict(range=[0, 1]), yaxis=dict(range=[0, 1]),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, title=None),
         )
         st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
     with right:
-        selected = st.selectbox("Inspect a predicted unit", options=list(top["unit_id"].astype(int)), format_func=lambda value: f"U{value:03d}", key="defect_unit_focus")
+        selected = st.selectbox("Inspect a predicted production unit", options=list(top["unit_id"].astype(int)), format_func=lambda value: f"Production Unit U{value:03d}", key="defect_unit_focus")
         row = assessment[assessment["unit_id"] == selected].iloc[0]
         trace = trace_unit(data, live, selected)
         suspect = trace["suspected_origin"]
         station = int(row["station"]) if pd.notna(row.get("station")) else -1
-        station_health = live["snapshot"].set_index("index")["health_true"].get(station, np.nan)
+        station_health = live["snapshot"].set_index("index")["health_estimate"].get(station, np.nan)
         action = "HUMAN REVIEW" if row["model_confidence"] >= .5 and row["input_trust"] < .7 else str(row["action"])
         st.markdown(
-            f'<div class="panel"><div class="eyebrow">UNIT INTELLIGENCE · {action}</div>'
+            f'<div class="panel"><div class="eyebrow">PRODUCTION UNIT INTELLIGENCE · {action}</div>'
             f'<div style="display:flex;justify-content:space-between;align-items:flex-end"><h3 style="margin:.2rem 0">U{selected:03d}</h3>'
             f'<b style="font:700 1.65rem Barlow Condensed;color:{RED if row["risk_score"] >= risk_thr else AMBER}">{row["risk_score"]:.1%} risk</b></div>'
             f'{_unit_path_html(trace["path"], suspect, len(live["snapshot"]))}<hr style="border:0;border-top:1px solid #e1ded5">'
             f'<div class="station-grid"><span>CURRENT STATION<strong>S{station:02d}</strong></span>'
             f'<span>SUSPECTED ORIGIN<strong>{"S" + format(suspect,"02d") if suspect is not None else "Insufficient evidence"}</strong></span>'
-            f'<span>STATION HEALTH<strong>{station_health:.0%}</strong></span><span>DETECTED AT<strong>t={row["latest_t"]:.0f}s</strong></span>'
+            f'<span>CONDITION ESTIMATE<strong>{station_health:.0%}</strong></span><span>DETECTED AT<strong>t={row["latest_t"]:.0f}s</strong></span>'
             f'<span>MODEL CONFIDENCE<strong>{row["model_confidence"]:.0%}</strong></span><span>INPUT TRUST<strong>{row["input_trust"]:.0%}</strong></span></div></div>',
             unsafe_allow_html=True,
         )
         signals = trace["abnormal_signals"]
+        recommendation, next_step, rationale = _recommended_unit_action(row, suspect, risk_thr)
+        st.markdown(
+            f'<div class="panel" style="margin-top:.65rem;border-left:4px solid {ACTION_COLORS.get(action, TEAL)}">'
+            f'<div class="eyebrow">RECOMMENDED NEXT ACTION</div><h3 style="margin:.15rem 0">{recommendation}</h3>'
+            f'<div style="font-size:.82rem;color:#344156">{next_step}</div>'
+            f'<div style="font-size:.7rem;color:#758092;margin-top:.35rem">{rationale}</div></div>',
+            unsafe_allow_html=True,
+        )
         st.caption("Suspected Origin is an evidence-based diagnostic lead, not a proven causal root cause.")
         if signals:
             st.markdown("**Relevant observed signals:** " + " · ".join(signals))
@@ -676,15 +793,15 @@ def render_defects(data: dict[str, Any], live: dict[str, Any]) -> None:
                 if len(cohort):
                     labels = ", ".join(f"U{int(value):03d}" for value in cohort)
                     st.markdown(f"**Downstream watch cohort:** {labels}")
-                    st.caption("These units followed through the suspected station within 10 simulation minutes. This proximity is a review cue, not proof they are defective.")
+                    st.caption("These production units followed through the suspected station within 10 simulation minutes. This proximity is a review cue, not proof they are defective.")
     show = top[["unit_id", "risk_score", "model_confidence", "input_trust", "effective_trust", "action", "latest_t"]].copy()
-    show.columns = ["Unit", "Defect risk", "Model confidence", "Input trust", "Effective trust", "Action", "Detection time"]
-    show["Unit"] = show["Unit"].map(lambda value: f"U{int(value):03d}")
+    show.columns = ["Production Unit", "Defect risk", "Model confidence", "Input trust", "Effective Trust", "Action", "Detection time"]
+    show["Production Unit"] = show["Production Unit"].map(lambda value: f"U{int(value):03d}")
     st.dataframe(show, hide_index=True, width="stretch", column_config={
         "Defect risk": st.column_config.ProgressColumn(format="percent", min_value=0, max_value=1),
         "Model confidence": st.column_config.ProgressColumn(format="percent", min_value=0, max_value=1),
         "Input trust": st.column_config.ProgressColumn(format="percent", min_value=0, max_value=1),
-        "Effective trust": st.column_config.ProgressColumn(format="percent", min_value=0, max_value=1),
+        "Effective Trust": st.column_config.ProgressColumn(format="percent", min_value=0, max_value=1),
     })
 
 
@@ -756,10 +873,10 @@ def render_station_health(data: dict[str, Any], live: dict[str, Any]) -> None:
     snapshot = live["snapshot"].copy()
     snapshot["risk"] = snapshot["live_score"].map(_station_risk)
     snapshot["station_label"] = snapshot.apply(lambda row: f'S{int(row["index"]):02d} · {row["name"]}', axis=1)
-    table = snapshot[["station_label", "display_state", "health_true", "util_live", "queue_pressure", "coverage_status", "sensor_coverage", "risk"]].copy()
-    table.columns = ["Station", "State", "Health", "Utilization", "Queue pressure", "Coverage", "Sensor coverage", "Risk"]
+    table = snapshot[["station_label", "display_state", "health_estimate", "util_live", "queue_pressure", "coverage_status", "sensor_coverage", "risk"]].copy()
+    table.columns = ["Station", "State", "Condition estimate", "Utilization", "Queue pressure", "Coverage", "Sensor coverage", "Risk"]
     st.dataframe(table, hide_index=True, width="stretch", height=330, column_config={
-        "Health": st.column_config.ProgressColumn(format="percent", min_value=0, max_value=1),
+        "Condition estimate": st.column_config.ProgressColumn(format="percent", min_value=0, max_value=1),
         "Utilization": st.column_config.ProgressColumn(format="percent", min_value=0, max_value=1),
         "Queue pressure": st.column_config.ProgressColumn(format="percent", min_value=0, max_value=1),
         "Sensor coverage": st.column_config.ProgressColumn(format="percent", min_value=0, max_value=1),
@@ -775,9 +892,9 @@ def render_station_health(data: dict[str, Any], live: dict[str, Any]) -> None:
     buffers = _window(data["buffer_history"], t_now, window_s)
     sensors = data["sensor_log"]
     sensors = sensors[(sensors["station"] == station) & (sensors["t"] <= t_now) & (sensors["t"] >= t_now - window_s) & sensors["channel"].isin(EXPECTED_CHANNELS)]
-    fig = make_subplots(rows=2, cols=2, subplot_titles=("Health", "Observed cycle interval", "Input buffer", "Measured sensors"))
+    fig = make_subplots(rows=2, cols=2, subplot_titles=("Simulation truth (validation only)", "Observed cycle interval", "Input buffer", "Measured sensors"))
     if not health.empty:
-        fig.add_trace(go.Scatter(x=health["t"], y=health["health_true"], name="Health", line=dict(color=GREEN, width=3)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=health["t"], y=health["health_true"], name="Simulation truth", line=dict(color=GREEN, width=3)), row=1, col=1)
     if not station_visits.empty:
         fig.add_trace(go.Scatter(x=station_visits["t_global"], y=station_visits["cycle_time"], name="Cycle", mode="lines+markers", line=dict(color=AMBER)), row=1, col=2)
     buffer_col = f"buffer_{station}"
@@ -844,7 +961,7 @@ def build_llm_context(data: dict[str, Any], live: dict[str, Any], alerts: list[d
         "station_states": [
             {
                 "station": f'S{int(row["index"]):02d}', "name": row["name"],
-                "state": row["display_state"], "health": round(float(row["health_true"]), 3),
+                "state": row["display_state"], "health": round(float(row["health_estimate"]), 3),
                 "utilization": round(float(row["util_live"]), 3), "buffer": int(row["buffer_in"]),
                 "queue_trend_per_100s": round(float(row["queue_slope"]), 3),
                 "coverage": row["coverage_status"],
@@ -892,8 +1009,8 @@ def _offline_shift_summary(context: dict[str, Any]) -> str:
     coverage = context["sensor_coverage"]
     parts = [
         f'The line is currently **{context["line_status"].lower()}** at t={context["timestamp_seconds"]:.0f}s, '
-        f'with {kpi["units_completed"]} completed units, {kpi["wip"]} units in progress, and '
-        f'an observed rolling throughput of {kpi["throughput"]:.1f} units/hour.',
+        f'with {kpi["units_completed"]} completed production units, {kpi["wip"]} in progress, and '
+        f'an observed rolling throughput of {kpi["throughput"]:.1f} production units/hour.',
         f'**{bottleneck["station"]} {bottleneck["name"]}** is the current constraint based on the live evidence available now.',
     ]
     if emerging:
@@ -910,7 +1027,7 @@ def _offline_shift_summary(context: dict[str, Any]) -> str:
             f'Its effective trust is {top["effective_trust"]:.1%}, so the policy action is **{top["action"]}**.'
         )
     else:
-        parts.append("No unit-level prediction is available at this playback time.")
+        parts.append("No production-unit prediction is available at this playback time.")
     if coverage:
         labels = ", ".join(f'{item["station"]} ({item["status"].lower()})' for item in coverage[:4])
         parts.append(f"Observability is incomplete at {labels}; decisions depending on those inputs should preserve human oversight.")
@@ -931,7 +1048,7 @@ def _offline_answer(question: str, context: dict[str, Any]) -> str:
         if emerging:
             answer += f' {emerging["station"]} {emerging["name"]} is the leading emerging candidate.'
         return answer
-    if any(term in q for term in ("highest defect", "highest risk", "which unit")):
+    if any(term in q for term in ("highest defect", "highest risk", "which unit", "which production unit")):
         if not risks:
             return "The current data is insufficient to determine this reliably."
         top = risks[0]
@@ -944,23 +1061,23 @@ def _offline_answer(question: str, context: dict[str, Any]) -> str:
             return "The current data is insufficient to determine this reliably."
         evidence = "; ".join(selected.get("origin_evidence", [])) or "the weakest observed station evidence on its path"
         return f'{selected["suspected_origin"]} is the suspected origin for {selected["unit"]}, based on {evidence}. This is a diagnostic lead, not a confirmed causal root cause.'
-    if "worst health" in q or "lowest health" in q:
+    if any(term in q for term in ("worst health", "lowest health", "lowest condition", "worst condition")):
         worst = min(stations, key=lambda row: row["health"])
-        return f'{worst["station"]} {worst["name"]} has the lowest current health at {worst["health"]:.1%}.'
+        return f'{worst["station"]} {worst["name"]} has the lowest current condition estimate at {worst["health"]:.1%}.'
     if any(term in q for term in ("sensor", "coverage", "incomplete", "inferred")):
         if not coverage:
             return "All stations currently have measured coverage for the required channels."
         return "Stations without full measured coverage: " + "; ".join(f'{item["station"]}: {item["status"]} (confidence {item["confidence"]:.0%})' for item in coverage) + "."
     if "human" in q or "review" in q or "trust" in q:
         if not risks:
-            return "Human review is recommended when high defect risk is paired with low effective trust. No current unit evidence is available to apply that policy."
+            return "Human review is recommended when high defect risk is paired with low Effective Trust. No current production-unit evidence is available to apply that policy."
         top = risks[0]
-        return f'For {top["unit"]}, model confidence ({top["model_confidence"]:.0%}) is multiplied by input trust ({top["input_trust"]:.0%}) to produce {top["effective_trust"]:.0%} effective trust. A high-risk call below the trust gate is routed to HUMAN REVIEW.'
+        return f'For Production Unit {top["unit"]}, model confidence ({top["model_confidence"]:.0%}) is multiplied by input trust ({top["input_trust"]:.0%}) to produce {top["effective_trust"]:.0%} Effective Trust. A high-risk call below the trust gate is routed to HUMAN REVIEW.'
     if "summary" in q or "supervisor" in q or "manager" in q or "focus" in q:
         return _offline_shift_summary(context)
     for station in stations:
         if station["station"].lower() in q:
-            return f'{station["station"]} {station["name"]} is {station["state"]}, health {station["health"]:.0%}, utilization {station["utilization"]:.0%}, buffer {station["buffer"]}, and sensor status {station["coverage"]}.'
+            return f'{station["station"]} {station["name"]} is {station["state"]}, condition estimate {station["health"]:.0%}, utilization {station["utilization"]:.0%}, buffer {station["buffer"]}, and sensor status {station["coverage"]}.'
     return "The current data is insufficient to determine this reliably."
 
 
@@ -1002,7 +1119,7 @@ def _call_llm(context: dict[str, Any], request_text: str) -> str:
     for attempt in range(2):
         try:
             response = client.models.generate_content(
-                model=os.getenv("GEMINI_MODEL", "gemini-3.7-flash"),
+                model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
                 contents=prompt,
                 config=config,
             )
@@ -1029,6 +1146,21 @@ def answer_dashboard_question(question: str, context: dict[str, Any], use_llm: b
     return _call_llm(context, question) if use_llm else _offline_answer(question, context)
 
 
+def _copilot_suggestions(context: dict[str, Any]) -> list[str]:
+    bottleneck = context["top_bottleneck"]
+    suggestions = [f'Why is {bottleneck["station"]} the current bottleneck?']
+    if context["high_risk_units"]:
+        suggestions.append("Which production unit has the highest risk?")
+    else:
+        suggestions.append("Summarize the supervisor's current priorities.")
+    coverage = context["sensor_coverage"]
+    if coverage:
+        suggestions.append("Which stations rely on incomplete or inferred sensor coverage?")
+    else:
+        suggestions.append("Which station has the lowest condition estimate?")
+    return suggestions
+
+
 def render_ai_copilot(context: dict[str, Any]) -> None:
     has_key = bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"))
     st.markdown(
@@ -1047,7 +1179,7 @@ def render_ai_copilot(context: dict[str, Any]) -> None:
     with right:
         if has_key:
             use_llm = st.toggle("Use Gemini", value=True, key="use_cloud_llm")
-            st.caption(f'Gemini model: {os.getenv("GEMINI_MODEL", "gemini-3.7-flash")}')
+            st.caption(f'Gemini model: {os.getenv("GEMINI_MODEL", "gemini-2.5-flash")}')
         else:
             use_llm = False
             st.info("No `GEMINI_API_KEY` found. Grounded local mode is active; the rest of Twinly works normally.")
@@ -1062,16 +1194,29 @@ def render_ai_copilot(context: dict[str, Any]) -> None:
         with st.container(border=True):
             st.markdown(st.session_state.shift_summary)
 
+    st.markdown("#### Suggested questions")
+    suggested_question = None
+    for column, prompt in zip(st.columns(3), _copilot_suggestions(context)):
+        with column:
+            if st.button(prompt, key=f"copilot_suggestion_{prompt}", width="stretch"):
+                st.session_state.copilot_question = prompt
+                suggested_question = prompt
+
     with st.form("copilot_question_form", clear_on_submit=False):
-        question = st.text_input("Ask Twinly about the current dashboard state", placeholder="Why is human review recommended?")
+        question = st.text_input(
+            "Ask Twinly about the current dashboard state",
+            placeholder="Why is human review recommended?",
+            key="copilot_question",
+        )
         submitted = st.form_submit_button("Ask Copilot")
-    if submitted:
+    if submitted or suggested_question:
+        request_text = suggested_question or question
         try:
-            st.session_state.copilot_answer = answer_dashboard_question(question, context, use_llm)
+            st.session_state.copilot_answer = answer_dashboard_question(request_text, context, use_llm)
             st.session_state.pop("copilot_cloud_error", None)
         except RuntimeError as exc:
             st.session_state.copilot_cloud_error = str(exc)
-            st.session_state.copilot_answer = answer_dashboard_question(question, context, False)
+            st.session_state.copilot_answer = answer_dashboard_question(request_text, context, False)
     if st.session_state.get("copilot_answer"):
         with st.container(border=True):
             st.markdown("**COPILOT ANSWER**")
@@ -1142,7 +1287,7 @@ def render_manager_view(data: dict[str, Any], live: dict[str, Any]) -> None:
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown('<div class="persona-card"><div class="eyebrow">SUPERVISOR · NOW</div><h3>Immediate control</h3>'
-                    f'<p>Inspect {live["kpis"]["current_bottleneck"]}; {live["kpis"]["high_risk_units"]} high-risk unit(s) and {live["kpis"]["degraded_stations"]} degraded station(s) currently require attention.</p></div>', unsafe_allow_html=True)
+                    f'<p>Inspect {live["kpis"]["current_bottleneck"]}; {live["kpis"]["high_risk_units"]} high-risk production unit(s) and {live["kpis"]["degraded_stations"]} degraded station(s) currently require attention.</p></div>', unsafe_allow_html=True)
     with c2:
         inferred = int((live["snapshot"]["coverage_status"] != "MEASURED").sum())
         st.markdown('<div class="persona-card"><div class="eyebrow">PLANT MANAGER · SHIFT</div><h3>Flow and reliability</h3>'
@@ -1163,7 +1308,7 @@ def render_manager_view(data: dict[str, Any], live: dict[str, Any]) -> None:
         fig.update_layout(title="Current station-state mix", height=340, margin=dict(l=10, r=10, t=50, b=10), paper_bgcolor="rgba(0,0,0,0)", legend_orientation="h")
         st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
     if not assessment.empty:
-        actions = assessment["action"].value_counts().rename_axis("Action").reset_index(name="Units")
+        actions = assessment["action"].value_counts().rename_axis("Action").reset_index(name="Production units")
         st.dataframe(actions, hide_index=True, width="stretch")
 
 
@@ -1262,18 +1407,18 @@ def main() -> None:
     alerts = build_alerts(data, live)
     context = build_llm_context(data, live, alerts)
     if active_section == "live":
-        _anchor("live-line", "Live Digital Twin", "Units, station conditions, buffers and trust-aware risk reconstructed only from events available at the current clock.")
+        _anchor("live-line", "Live Digital Twin", "Production units, station conditions, buffers and trust-aware risk reconstructed only from events available at the current clock.")
         render_live_pipeline(live)
         st.markdown("### Live alert feed")
         render_alerts(alerts)
     elif active_section == "defects":
-        _anchor("defects", "Defect Intelligence", "Unit-level model output, path evidence, suspected origin and the confidence × input-trust decision gate.")
+        _anchor("defects", "Defect Intelligence", "Production-unit model output, path evidence, suspected origin and the confidence × input-trust decision gate.")
         render_defects(data, live)
     elif active_section == "bottlenecks":
         _anchor("bottlenecks", "Bottleneck Intelligence", "The sustained current constraint is separated from leading queue-growth and cycle-drift evidence.")
         render_bottlenecks(data, live)
     elif active_section == "health":
-        _anchor("health", "Station Health", "Compare every station, then inspect health, cycle, buffer and sensor history without leaking future observations.")
+        _anchor("health", "Station Health", "Compare every station, then inspect condition, cycle, buffer and sensor history without leaking future observations.")
         render_station_health(data, live)
         st.markdown("### Sensor coverage & trust")
         render_sensor_coverage(data, live)

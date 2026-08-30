@@ -25,6 +25,19 @@ htmlcov/
 !/data/simulated/.gitkeep
 /data/demo_live/*
 !/data/demo_live/.gitkeep
+!/data/demo_live/line_events.csv
+!/data/demo_live/buffer_history.csv
+!/data/demo_live/health_log.csv
+!/data/demo_live/sensor_log.csv
+!/data/demo_live/unit_log.csv
+!/data/demo_live/unit_summary.csv
+!/data/demo_live/station_stats.csv
+!/data/demo_live/station_registry.csv
+!/data/demo_live/unit_visit_times.csv
+!/data/demo_live/demo_assessment.csv
+!/data/demo_live/virtual_sensor_events.csv
+!/data/demo_live/manifest.json
+!/data/demo_live/bottleneck_report.json
 /data/bosch_numeric_sample.csv
 /data/train_numeric.csv
 /data/*.zip
@@ -34,6 +47,8 @@ htmlcov/
 # Trained models, Optuna studies, tuning output, and checkpoints.
 /artifacts/*
 !/artifacts/.gitkeep
+!/artifacts/defect_model.json
+!/artifacts/defect_model_meta.json
 !/artifacts/tuning/
 /artifacts/tuning/*
 !/artifacts/tuning/.gitkeep

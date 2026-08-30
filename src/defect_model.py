@@ -102,7 +102,7 @@ class DefectMetrics:
 
 class DefectModel:
     def __init__(self, seed: int = 42, xgb_params: dict | None = None,
-                 threshold_params: dict | None = None, auto_load_tuned: bool = True):
+                 threshold_params: dict | None = None, auto_load_tuned: bool = False):
         self.seed = seed
         tuned = (load_tuned_defect_config()
                  if auto_load_tuned and xgb_params is None and threshold_params is None

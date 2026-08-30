@@ -166,7 +166,16 @@ def evaluate_holdout(model: DefectModel, X_test: pd.DataFrame, y_test_s: pd.Seri
     for k, (caught, total) in topk.items():
         print(f"    top {int(k*100):>2}% : {caught}/{total} defects "
               f"({caught / max(1, total) * 100:.1f}%)")
-    return {"auc": auc, "topk": topk}
+    return {
+        "auc": float(auc),
+        "mcc": float(matthews_corrcoef(y_test, pred)),
+        "precision": float(precision_score(y_test, pred, zero_division=0)),
+        "recall": float(recall_score(y_test, pred, zero_division=0)),
+        "threshold": float(model.threshold),
+        "n_test": int(len(y_test)),
+        "n_pos_test": int(y_test.sum()),
+        "topk": topk,
+    }
 
 
 def load_split():
@@ -176,13 +185,15 @@ def load_split():
 
     X = features.drop(columns=NON_FEATURE_COLS)
     y = features["response"].astype(int)
-    train_mask = features["session_id"].isin(manifest["train_sessions"])
+    development_sessions = manifest["train_sessions"] + manifest.get("validation_sessions", [])
+    train_mask = features["session_id"].isin(development_sessions)
     test_mask = features["session_id"].isin(manifest["test_sessions"])
     return features, X, y, train_mask, test_mask
 
 
 def save_trained_artifacts(model: DefectModel, feature_columns: list[str],
-                           train_rows: int, test_rows: int) -> None:
+                           train_rows: int, test_rows: int,
+                           holdout_metrics: dict | None = None) -> None:
     ensure_artifact_dirs()
     model.model.save_model(TRAINED_MODEL_PATH)
     meta = {
@@ -192,7 +203,13 @@ def save_trained_artifacts(model: DefectModel, feature_columns: list[str],
         "threshold_params": model.threshold_params,
         "train_rows": train_rows,
         "test_rows": test_rows,
-        "metrics": vars(model.metrics) if model.metrics is not None else None,
+        "metrics": holdout_metrics or (vars(model.metrics) if model.metrics is not None else None),
+        "internal_calibration_metrics": (
+            vars(model.metrics) if model.metrics is not None else None
+        ),
+        "evaluation_protocol": (
+            "Chronological session holdout evaluated once after model and threshold selection."
+        ),
     }
     save_json(TRAINED_MODEL_META_PATH, meta)
     print(f"\n[write] {TRAINED_MODEL_PATH}")
@@ -307,7 +324,11 @@ def main():
               f"{len(real_cols)} real features ===")
         before = evaluate_holdout(model, X[test_mask], y[test_mask],
                                   "WITH decoys (current model)")
-        model_real = DefectModel().fit(X.loc[train_mask, real_cols], y[train_mask])
+        model_real = DefectModel(
+            xgb_params=tuned["xgb_params"],
+            threshold_params=tuned["threshold_params"],
+            auto_load_tuned=args.use_tuned,
+        ).fit(X.loc[train_mask, real_cols], y[train_mask])
         after = evaluate_holdout(model_real, X.loc[test_mask, real_cols], y[test_mask],
                                  "WITHOUT decoys (real channels only)")
         b10, a10 = before["topk"][0.10], after["topk"][0.10]
@@ -315,9 +336,16 @@ def main():
         print(f"\n  summary  AUC {before['auc']:.3f} -> {after['auc']:.3f}   "
               f"top10% {b10[0]}/{b10[1]} -> {a10[0]}/{a10[1]}   "
               f"top20% {b20[0]}/{b20[1]} -> {a20[0]}/{a20[1]}")
-        save_trained_artifacts(model_real, list(real_cols), int(train_mask.sum()), int(test_mask.sum()))
+        save_trained_artifacts(
+            model_real, list(real_cols), int(train_mask.sum()), int(test_mask.sum()),
+            holdout_metrics={key: value for key, value in after.items() if key != "topk"},
+        )
     else:
-        save_trained_artifacts(model, list(X.columns), int(train_mask.sum()), int(test_mask.sum()))
+        final_metrics = evaluate_holdout(model, X[test_mask], y[test_mask], "FINAL production model")
+        save_trained_artifacts(
+            model, list(X.columns), int(train_mask.sum()), int(test_mask.sum()),
+            holdout_metrics={key: value for key, value in final_metrics.items() if key != "topk"},
+        )
 
 
 if __name__ == "__main__":

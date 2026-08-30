@@ -53,8 +53,14 @@ def _feature_split(features: pd.DataFrame):
     X = features.drop(columns=NON_FEATURE_COLS)
     y = features["response"].astype(int)
     train_mask = features["session_id"].isin(manifest["train_sessions"])
-    test_mask = features["session_id"].isin(manifest["test_sessions"])
-    return X, y, train_mask, test_mask
+    validation_sessions = manifest.get("validation_sessions")
+    if not validation_sessions:
+        raise RuntimeError(
+            "manifest.json has no validation_sessions; regenerate training data "
+            "with --validation-sessions before tuning"
+        )
+    validation_mask = features["session_id"].isin(validation_sessions)
+    return X, y, train_mask, validation_mask
 
 
 def _real_only(X: pd.DataFrame) -> pd.DataFrame:
@@ -111,18 +117,21 @@ def tune_virtual_sensor(trial: optuna.Trial) -> float:
         "tier_c_max_staleness": trial.suggest_float("tier_c_max_staleness", 600.0, 7200.0),
     }
     features = build_features(verbose=False, params=params)
-    X, y, train_mask, test_mask = _feature_split(features)
+    X, y, train_mask, validation_mask = _feature_split(features)
     X_real = _real_only(X)
     model = DefectModel().fit(X_real[train_mask], y[train_mask])
-    out = model.predict_with_confidence(X_real[test_mask])
-    y_test = y[test_mask].to_numpy()
+    out = model.predict_with_confidence(X_real[validation_mask])
+    y_test = y[validation_mask].to_numpy()
     try:
         auc = float(roc_auc_score(y_test, out["risk_score"]))
     except ValueError:
         auc = 0.5
     top20 = build_topk(out["risk_score"].to_numpy(), y_test)[0.20]
     top20_recall = top20[0] / max(1, top20[1])
-    sensor_report = validate(build_virtual_sensors(params))
+    sensor_report = validate(
+        build_virtual_sensors(params),
+        session_ids=_load_manifest()["validation_sessions"],
+    )
     sensor_gain, coverage = _sensor_gain(sensor_report)
     score = 0.65 * auc + 0.20 * top20_recall + 0.10 * sensor_gain + 0.05 * coverage
     trial.set_user_attr("auc", auc)
@@ -165,13 +174,14 @@ def tune_defect_model(trial: optuna.Trial) -> float:
         },
     }
 
-    _, X, y, train_mask, test_mask = load_split()
+    features, X, y, _, _ = load_split()
+    _, _, train_mask, validation_mask = _feature_split(features)
     X_real = _real_only(X)
     model = DefectModel(xgb_params=params["xgb_params"],
                         threshold_params=params["threshold_params"]).fit(
                             X_real[train_mask], y[train_mask])
-    out = model.predict_with_confidence(X_real[test_mask])
-    y_test = y[test_mask].to_numpy()
+    out = model.predict_with_confidence(X_real[validation_mask])
+    y_test = y[validation_mask].to_numpy()
     try:
         auc = float(roc_auc_score(y_test, out["risk_score"]))
     except ValueError:
@@ -237,9 +247,14 @@ def train_final_model() -> None:
     ensure_feature_table()
     _, X, y, train_mask, test_mask = load_split()
     X_real = _real_only(X)
-    model = DefectModel().fit(X_real[train_mask], y[train_mask])
-    evaluate_holdout(model, X_real[test_mask], y[test_mask], "FINAL tuned production model")
-    save_trained_artifacts(model, list(X_real.columns), int(train_mask.sum()), int(test_mask.sum()))
+    model = DefectModel(auto_load_tuned=True).fit(X_real[train_mask], y[train_mask])
+    metrics = evaluate_holdout(
+        model, X_real[test_mask], y[test_mask], "FINAL untouched chronological test"
+    )
+    save_trained_artifacts(
+        model, list(X_real.columns), int(train_mask.sum()), int(test_mask.sum()),
+        holdout_metrics={key: value for key, value in metrics.items() if key != "topk"},
+    )
 
 
 def main() -> None:
@@ -255,7 +270,7 @@ def main() -> None:
 
     if args.study in {"virtual", "all"}:
         study = run_study(
-            name="digitaltwin_virtual_sensor",
+            name="digitaltwin_virtual_sensor_leakage_free_v2",
             objective=tune_virtual_sensor,
             n_trials=args.virtual_trials,
             timeout=args.timeout,
@@ -278,7 +293,7 @@ def main() -> None:
 
     if args.study in {"defect", "all"}:
         study = run_study(
-            name="digitaltwin_defect_model",
+            name="digitaltwin_defect_model_leakage_free_v2",
             objective=tune_defect_model,
             n_trials=args.defect_trials,
             timeout=args.timeout,
@@ -299,7 +314,6 @@ def main() -> None:
         print(f"\nBest defect-model score: {study.best_value:.4f}")
 
     if not args.skip_final_train:
-        rebuild_best_features()
         train_final_model()
 
 

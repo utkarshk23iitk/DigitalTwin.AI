@@ -45,8 +45,9 @@ schemas, feature pipeline, trust logic, and dashboard concepts.
 
 ## 2. Submission boundary
 
-The Git submission contains source code and reproducibility instructions. It
-does not publish generated data, trained weights, tuning databases, or secrets.
+The Git submission contains source code, reproducibility instructions, a compact
+demo replay, and the final model required to launch the dashboard immediately.
+It does not publish the large historical corpus, tuning databases, or secrets.
 
 ### Included in Git
 
@@ -54,6 +55,7 @@ does not publish generated data, trained weights, tuning databases, or secrets.
 - Simulation, feature engineering, training, trust, and visualization source.
 - Data-generation and demo-inference scripts.
 - `requirements.txt` and `.env.example`.
+- The compact `data/demo_live/` runtime replay and final model/metadata.
 - This report and the landing `README.md`.
 - Empty `.gitkeep` placeholders for generated directories.
 - `scripts/verify_submission.py` for pre-push hygiene checks.
@@ -61,14 +63,13 @@ does not publish generated data, trained weights, tuning databases, or secrets.
 ### Kept locally and ignored
 
 - `data/simulated/`: historical sessions and chronological holdout data.
-- `data/demo_live/`: a fresh replay shift plus inferred/predicted outputs.
-- `artifacts/`: XGBoost weights and model metadata.
+- `data/demo_live/model_features.csv`: rebuild-only intermediate, not needed by the app.
+- Historical or experimental model artifacts other than the final runtime model.
 - `artifacts/tuning/`: Optuna SQLite studies, best parameters, and checkpoints.
 - Generated HTML visualizations, caches, environments, logs, and credentials.
 
-Ignoring an already tracked file is not sufficient, so generated files are
-removed from the Git index with `git rm --cached`; this does not delete the
-local file. The final verification script checks this boundary.
+The final verification script enforces this boundary and checks that every file
+needed for a clean-clone dashboard launch is tracked.
 
 ## 3. End-to-end architecture
 
@@ -149,8 +150,9 @@ configuration reproducible.
 ### 4.2 Health mechanism
 
 The simulation contains a hidden station condition `H(t)` between 0 and 1.
-This is the source of the dashboard's demo health score, not a separately
-trained health classifier.
+It drives the simulation and is retained only for validation. Live dashboard
+decisions use an observable condition proxy derived from as-of sensor deviation,
+cycle drift, downtime, and current operational state.
 
 Health changes through gradual degradation episodes:
 
@@ -170,12 +172,12 @@ health-driven component of defect probability. This shared mechanism creates
 a coherent precursor instead of generating unrelated random alerts.
 
 Important interpretation: `health_true` is available because this is a
-simulation. It is hidden from model training and retained for validation and
-demo explanation. A production deployment would replace it with a condition
-estimate derived from observed telemetry, maintenance state, or a calibrated
-health model. It must not be presented as directly measurable plant truth.
+simulation. It is hidden from model training and operational scoring and appears
+only in the explicitly labelled validation chart. A production deployment would
+calibrate the observable proxy against maintenance outcomes or replace it with a
+dedicated condition model.
 
-Dashboard state labels use the latest health sample at or before the playback
+Dashboard state labels use the observable condition estimate at the playback
 clock:
 
 - Running and health >= 0.90: `RUNNING`.
@@ -207,7 +209,7 @@ the station is marked unrecoverable instead of receiving an invented value.
 | `unit_features.csv` | Per-unit observed snapshots with realistic missingness | Yes |
 | `unit_features_true.csv` | Complete values behind missing sensors | No; imputation validation only |
 | `unit_visit_times.csv` | When each unit reached each station | Yes; as-of joins |
-| `manifest.json` | Seeds, sessions, and chronological train/test split | Split control |
+| `manifest.json` | Seeds and chronological fit/validation/test sessions | Split control |
 | `model_features.csv` | Final trend/imputation feature table | Yes |
 
 The true-value table must never be joined into defect-model training. It exists
@@ -245,12 +247,18 @@ therefore distinguishes measured samples, missing periods, inferred fills,
 confidence, and the downstream handoff instead of claiming that a flat line is
 a directly measured sensor trace.
 
-### 5.3 Optuna-tuned virtual parameters
+### 5.3 Validation-only Optuna tuning
 
 The virtual study searches correlation thresholds, minimum pair counts,
 Kalman process/measurement noise scales, numeric floors, rolling windows, and
 staleness limits. The objective combines spatial and temporal validation so a
 configuration cannot win by improving only one branch.
+
+The chronological split has 40 fit sessions, 10 validation sessions, and 10
+final test sessions. Both Optuna studies use only fit/validation evidence. Study
+names were versioned after this correction so an older test-contaminated study
+cannot silently resume. The final test sessions are evaluated once after model
+and threshold selection.
 
 Best-trial parameters and checkpoint summaries are written below
 `artifacts/tuning/`. Optuna's SQLite study lets interrupted runs resume under
@@ -307,17 +315,17 @@ The latest local metadata reports:
 
 | Metric | Value |
 |---|---:|
-| Chronological held-out ROC AUC | 0.7286 |
-| Recall | 0.3333 |
-| Precision | 0.0294 |
-| MCC | 0.0815 |
-| Learned threshold | 0.6127 |
-| Held-out rows | 13,678 |
-| Held-out positives | 84 |
+| Final chronological test ROC AUC | 0.7153 |
+| Recall | 0.2105 |
+| Precision | 0.0350 |
+| MCC | 0.0737 |
+| Learned threshold | 0.6053 |
+| Held-out rows | 13,659 |
+| Held-out positives | 76 |
 
-These numbers belong to the local artifact generated on the stated simulated
-configuration. The artifact is intentionally ignored by Git. Regeneration can
-change the result if seeds, sessions, code, or search budget change.
+These numbers belong to the packaged leakage-free baseline artifact generated
+on the stated simulated configuration. Regeneration can change the result if
+seeds, sessions, code, or an optional validation-only search budget changes.
 
 ## 8. Effective Trust and decisions
 
@@ -596,7 +604,8 @@ Local outputs:
 | `artifacts/defect_model.json` | Saved XGBoost weights |
 | `artifacts/defect_model_meta.json` | Feature schema, metrics, threshold, and parameters |
 
-All are ignored by Git but remain available locally after repository cleanup.
+The final model and metadata are packaged for immediate dashboard startup.
+Tuning studies, checkpoints, and large historical data remain local and ignored.
 
 ## 14. Reproduction commands
 
@@ -613,13 +622,14 @@ pip install -r requirements.txt
 
 ```bash
 python data/generate_training_data.py \
-  --sessions 60 --duration 100000 --seed 100 --test-sessions 10
+  --sessions 60 --duration 100000 --seed 100 \
+  --validation-sessions 10 --test-sessions 10
 
 python src/optuna_tune.py \
   --study all --virtual-trials 30 --defect-trials 50
 
 python data/generate_demo_data.py --duration 8000 --seed 999
-python data/build_demo_inference.py
+python data/build_demo_inference.py --use-tuned
 streamlit run app2.py
 ```
 
@@ -627,7 +637,8 @@ streamlit run app2.py
 
 ```bash
 python data/generate_training_data.py \
-  --sessions 60 --duration 100000 --seed 100 --test-sessions 10
+  --sessions 60 --duration 100000 --seed 100 \
+  --validation-sessions 10 --test-sessions 10
 python src/feature_engineering.py
 python src/train_defect_model.py
 python data/generate_demo_data.py --duration 8000 --seed 999
@@ -635,7 +646,9 @@ python data/build_demo_inference.py
 streamlit run app2.py
 ```
 
-This path uses saved tuned parameters when present and source defaults otherwise.
+This path deliberately uses source defaults. Tuned parameters are loaded only
+when `--use-tuned` is explicitly supplied, preventing stale local search output
+from silently changing a reproducible baseline.
 
 ### 14.4 Submission verification
 
@@ -668,8 +681,8 @@ The prototype can be migrated incrementally:
 - The prototype is a digital shadow/replay, not a bidirectionally connected
   production digital twin.
 - Simulation assumptions are not measured plant parameters.
-- Demo `health_true` is hidden simulation truth and would not exist directly in
-  production.
+- Demo `health_true` is hidden simulation truth, excluded from live decisions,
+  and shown only in the explicitly labelled validation chart.
 - Defect and bottleneck logic are related through simulated health dynamics;
   this is a designed test environment, not proof of universal causality.
 - The defect model has useful ranking signal, not industry-grade proof of

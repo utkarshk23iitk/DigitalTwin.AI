@@ -30,6 +30,7 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -218,7 +219,7 @@ def build_features_from_frames(obs: pd.DataFrame, registry: pd.DataFrame,
                                sensor_log: pd.DataFrame, unit_visit_times: pd.DataFrame,
                                sensors: dict, verbose: bool = True,
                                params: dict | None = None) -> pd.DataFrame:
-    cfg = {**DEFAULT_FEATURE_PARAMS, **load_tuned_virtual_sensor_params(), **(params or {})}
+    cfg = {**DEFAULT_FEATURE_PARAMS, **(params or {})}
     if verbose:
         print("[2/4] tier A/C rolling trend features...")
     tier_ac = build_tier_a_c_features(unit_visit_times, sensor_log, registry, cfg)
@@ -237,6 +238,19 @@ def build_features_from_frames(obs: pd.DataFrame, registry: pd.DataFrame,
         if not extra.empty:
             result = result.merge(extra, on=["session_id", "unit_id"], how="left")
 
+    expected_virtual = {
+        f"S{station}_{channel}_{suffix}"
+        for (station, channel), info in sensors.items()
+        if info.get("method") in {"spatial", "temporal"}
+        for suffix in ("est", "conf")
+    }
+    missing_virtual = sorted(expected_virtual - set(result.columns))
+    if missing_virtual:
+        raise RuntimeError(
+            "virtual-sensor feature generation is incomplete: "
+            + ", ".join(missing_virtual)
+        )
+
     if verbose:
         n_feat = result.shape[1] - 5
         print(f"\n[done] {len(result)} units x {n_feat} engineered features")
@@ -245,7 +259,7 @@ def build_features_from_frames(obs: pd.DataFrame, registry: pd.DataFrame,
 
 
 def build_features(verbose: bool = True, params: dict | None = None) -> pd.DataFrame:
-    cfg = {**DEFAULT_FEATURE_PARAMS, **load_tuned_virtual_sensor_params(), **(params or {})}
+    cfg = {**DEFAULT_FEATURE_PARAMS, **(params or {})}
     true, obs, registry, sensor_log, manifest = load_all()
     unit_visit_times = pd.read_csv(DATA_DIR / "unit_visit_times.csv")
 
@@ -265,7 +279,12 @@ def build_features(verbose: bool = True, params: dict | None = None) -> pd.DataF
 
 
 if __name__ == "__main__":
-    features = build_features()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--use-tuned", action="store_true",
+                        help="use validation-selected virtual-sensor parameters")
+    args = parser.parse_args()
+    selected_params = load_tuned_virtual_sensor_params() if args.use_tuned else {}
+    features = build_features(params=selected_params)
     out_path = DATA_DIR / "model_features.csv"
     features.to_csv(out_path, index=False)
     print(f"[write] {out_path}")

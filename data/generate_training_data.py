@@ -83,7 +83,12 @@ def _pivot_unit_log(unit_log: pd.DataFrame, value_col: str) -> pd.DataFrame:
     return wide.reset_index()
 
 
-def generate(n_sessions: int, duration: float, base_seed: int, n_test_sessions: int = 1) -> dict:
+def generate(n_sessions: int, duration: float, base_seed: int,
+             n_validation_sessions: int = 1, n_test_sessions: int = 1) -> dict:
+    if min(n_validation_sessions, n_test_sessions) < 1:
+        raise ValueError("validation and test session counts must both be positive")
+    if n_validation_sessions + n_test_sessions >= n_sessions:
+        raise ValueError("at least one training session is required")
     health_frames, sensor_frames, unit_log_frames, summary_frames = [], [], [], []
     registry = None
 
@@ -141,19 +146,21 @@ def generate(n_sessions: int, duration: float, base_seed: int, n_test_sessions: 
     unit_features_true.to_csv(OUT_DIR / "unit_features_true.csv", index=False)
     unit_visit_times.to_csv(OUT_DIR / "unit_visit_times.csv", index=False)
 
+    train_end = n_sessions - n_validation_sessions - n_test_sessions
+    validation_end = n_sessions - n_test_sessions
     manifest = {
         "n_sessions": n_sessions,
         "duration_per_session_s": duration,
         "base_seed": base_seed,
         "health_tick_s": HEALTH_TICK,
-        "train_sessions": list(range(n_sessions - n_test_sessions)),
-        "test_sessions": list(range(n_sessions - n_test_sessions, n_sessions)),
-        "split_note": (f"Chronological: train on the first {n_sessions - n_test_sessions} "
-                       f"sessions, evaluate on the last {n_test_sessions} held-out "
-                       "sessions. Never shuffle rows across sessions -- that would "
-                       "leak within a single health episode. Multiple test sessions "
-                       "(not just one) are used so the held-out defect count is "
-                       "large enough for a stable evaluation."),
+        "train_sessions": list(range(train_end)),
+        "validation_sessions": list(range(train_end, validation_end)),
+        "test_sessions": list(range(validation_end, n_sessions)),
+        "split_note": (
+            f"Chronological: fit on the first {train_end} sessions, tune on the next "
+            f"{n_validation_sessions} validation sessions, and evaluate once on the final "
+            f"{n_test_sessions} test sessions. Rows are never shuffled across sessions."
+        ),
         "totals": {
             "health_log_rows": len(health_log),
             "sensor_log_rows": len(sensor_log),
@@ -179,13 +186,20 @@ def main() -> None:
                     help="base seed; session i uses seed + i (default: 100)")
     ap.add_argument("--test-sessions", type=int, default=1,
                     help="number of trailing sessions held out for evaluation (default: 1)")
+    ap.add_argument("--validation-sessions", type=int, default=1,
+                    help="number of sessions reserved for tuning before the test set (default: 1)")
     args = ap.parse_args()
 
-    manifest = generate(args.sessions, args.duration, args.seed, args.test_sessions)
+    manifest = generate(
+        args.sessions, args.duration, args.seed,
+        n_validation_sessions=args.validation_sessions,
+        n_test_sessions=args.test_sessions,
+    )
     print(f"\n[write] {OUT_DIR}/")
     print(json.dumps(manifest["totals"], indent=2))
-    print(f"\nTrain sessions: {manifest['train_sessions']}  "
-          f"Test session: {manifest['test_sessions']}")
+    print(f"\nTrain sessions: {manifest['train_sessions']}\n"
+          f"Validation sessions: {manifest['validation_sessions']}\n"
+          f"Test sessions: {manifest['test_sessions']}")
 
 
 if __name__ == "__main__":

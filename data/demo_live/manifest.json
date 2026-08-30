@@ -1,0 +1,18 @@
+{
+  "kind": "demo_live_shift",
+  "duration_s": 8000.0,
+  "seed": 999,
+  "health_tick_s": 10.0,
+  "buffer_capacity": 4,
+  "stations": 12,
+  "totals": {
+    "event_rows": 2283,
+    "buffer_rows": 1560,
+    "health_rows": 9360,
+    "sensor_rows": 39005,
+    "unit_rows": 6845,
+    "finished_units": 103,
+    "defects": 1,
+    "defect_rate_pct": 0.9709
+  }
+}

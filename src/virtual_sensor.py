@@ -286,13 +286,17 @@ def fit_virtual_sensors(verbose: bool = True, params: dict | None = None) -> dic
     return sensors
 
 
-def validate(sensors: dict) -> pd.DataFrame:
-    """Score each sensor's imputation accuracy on the held-out test session,
-    against the hidden true values -- never used for fitting."""
+def validate(sensors: dict, session_ids: list[int] | None = None) -> pd.DataFrame:
+    """Score imputation against hidden truth on explicitly selected sessions.
+
+    The standalone report defaults to the final test sessions. Hyperparameter
+    tuning passes validation sessions so final test truth remains untouched.
+    """
     true, obs, registry, sensor_log, manifest = load_all()
-    true_test = _test(true, manifest)
-    obs_test = _test(obs, manifest)
-    sensor_log_test = _test(sensor_log, manifest)
+    selected = session_ids if session_ids is not None else manifest["test_sessions"]
+    true_test = true[true["session_id"].isin(selected)]
+    obs_test = obs[obs["session_id"].isin(selected)]
+    sensor_log_test = sensor_log[sensor_log["session_id"].isin(selected)]
 
     true_train = _train(true, manifest)
 

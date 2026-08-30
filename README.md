@@ -85,7 +85,8 @@ measurement.
   data to be trustworthy on day one — exactly what a floor supervisor needs to believe on
   sight, not a black box.
 - **Defect prediction** uses a regularised **XGBoost** classifier over trend-aware engineered
-  features, with hyperparameters and decision threshold Optuna-tuned. We chose gradient
+  features. The packaged baseline uses source-controlled defaults; optional Optuna tuning
+  selects hyperparameters and the decision threshold on dedicated validation sessions only. We chose gradient
   boosting because it handles the Bosch-style structural missingness (whole blocks of columns
   absent depending on a station's tier) natively through its own split-finding — no separate
   imputation step needed.
@@ -127,28 +128,27 @@ Risk × Trust action matrix: **AUTO-ACT, HUMAN-VERIFY, MONITOR, or PASS**.
 Every number below comes from a held-out set the model never trained on — nothing here is
 asserted without a check behind it.
 
-- **Defect model**: chronological held-out **ROC AUC 0.7286** (recall 0.3333, precision 0.0294,
-  MCC 0.0815) on 13,678 held-out rows containing 84 positive examples — a rare-event ranking
+- **Defect model**: chronological held-out **ROC AUC 0.7153** (recall 0.2105, precision 0.0350,
+  MCC 0.0737) on 13,659 held-out rows containing 76 positive examples — a rare-event ranking
   metric, not raw accuracy, since a model predicting every unit as non-defective would look
   accurate at this class imbalance while catching nothing.
 - **Bottleneck detection**: median **680s lead time** ahead of the bottleneck forming, at a
   **27.9% false-alarm rate** we're still tuning down.
 - **Effective Trust actually separates good flags from bad ones**: AUTO-ACT flags are
-  **1.86× as precise** as HUMAN-VERIFY flags among held-out high-risk units.
+  **2.99× as precise** as HUMAN-VERIFY flags among held-out high-risk units.
 
 <details>
 <summary>Full validation detail (thresholds, baselines, feature checks)</summary>
 
-- Recall at other risk thresholds, from the larger 60-session / 76-held-out-defect evaluation
-  configuration described in [§5](#5-data--assumptions): top-10% 36.8%, top-5% 22.4%, top-1%
-  11.8%.
+- Recall at fixed review budgets on the same 76-defect final test set: top-20% 50.0%,
+  top-10% 32.9%, top-5% 25.0%, and top-1% 9.2%.
 - Feature selection is validated, not assumed: irrelevant "decoy" sensor channels score ~0 on
   permutation importance, and dropping them improves held-out AUC 0.69 → 0.72 pre-tuning (same
   larger evaluation configuration).
 - Virtual sensor accuracy is checked against fair baselines, not itself: Kalman beats naive
   forward-fill by 9–20%; spatial regression beats a naive mean-guess by 29–44% overall, and
   by 54–66% specifically during drift episodes — the case that matters most for prediction.
-- AUTO-ACT vs. HUMAN-VERIFY defect rates: 3.08% vs. 1.66%.
+- AUTO-ACT vs. HUMAN-VERIFY defect rates: 5.24% vs. 1.75%.
 - Small-sample AUC variance and the ~30% of defects that are spontaneous and unlearnable by
   design are known caveats, documented in full in [docs/SUBMISSION_REPORT.md](docs/SUBMISSION_REPORT.md).
 
@@ -217,13 +217,16 @@ Fresh demo shift (PLC/SCADA/MES in production)
 - **Causally-linked bottleneck + defect signals** — a hidden per-station health state drives
   sensor drift, cycle-time/failure-rate creep, *and* defect risk together, so predictions are
   trend-based on a real shared cause rather than independent threshold trips on decorative
-  columns.
 - **Late-surfacing defect tracing** — `defect_occurred_at` vs. `defect_caught_at` gives a
   genuine (station-based) detection lead-time metric instead of an assumed one.
 - **Effective Trust gates every action** — `input_trust × model_confidence` (multiplied, not
   averaged, so one weak factor cannot be masked by the other), driving a Risk × Trust action
-  matrix that routes high-risk-but-low-trust flags to a human instead of auto-acting on
-  shaky data.
+  matrix that plots current production units in the `AUTO-ACT`, `HUMAN-VERIFY`, `MONITOR`,
+  and `PASS` quadrants. High-risk-but-low-trust flags route to a human instead of auto-acting
+  on shaky data.
+- **Operational follow-through** — deterministic next actions turn each selected production-unit
+  assessment into a hold, human-verification, monitoring, or standard-flow recommendation.
+  Live alerts can be assigned, acknowledged, placed under review, and resolved in-session.
 - **One model, three stakeholder lenses** — Supervisor / Manager / Leadership views are three
   projections of the *same* per-unit assessment, so numbers never diverge across the
   personas — a deliberate design requirement, not three separate tools glued together.
@@ -231,9 +234,10 @@ Fresh demo shift (PLC/SCADA/MES in production)
   consumes a source-agnostic station-data schema; SimPy is a swappable stand-in, not a hard
   dependency.
 - **False-alarm / trust calibration made visible, not hidden** — bottleneck false-alarm rate
-  (27.9%) and the trust-gating precision lift (1.86×) are both reported as measured numbers,
+  (27.9%) and the trust-gating precision lift (2.99×) are both reported as measured numbers,
   including where the current calibration is still loose.
-- **Optional AI Copilot, narration only** — a grounded explanation layer over the already-computed
+- **Optional AI Copilot, narration only** — a grounded explanation layer with contextual suggested
+  questions over the already-computed
   state (never a source of new numbers), with a deterministic local fallback if no API key is
   configured — see [§10](#10-optional-ai-copilot--narration-not-computation).
 
@@ -279,10 +283,10 @@ claimed.**
   realistic shape. The simulator itself, not Bosch, generates every value used in training
   and the live pipeline — Bosch rows are never trained on directly, only used to inform the
   structure our simulated data follows.
-- **Offline training dataset**: the final calibrated run is **60 sessions × 100,000 simulated
-  seconds (50 train / 10 held-out test)** → 82,047 units, 497 defects (0.61%), ~76 held-out
-  defects. Train/test split is **chronological**, never random, so no health episode leaks
-  across the split.
+- **Offline training dataset**: the final run is **60 sessions × 100,000 simulated seconds**:
+  40 fit sessions, 10 validation sessions, and 10 final test sessions, producing 82,047 units
+  and 497 defects (0.61%), including 76 final-test defects. Splits are chronological and never
+  shuffled across sessions. Optuna sees validation only; the test split is evaluated once.
 - **Deliberately out of scope, stated up front**: real PLC/OT wiring, part geometry,
   tool-wear physics, upstream supply chain, and production-grade scale — this is a
   proof-of-concept of the causal drift → bottleneck/defect → trust-gated action mechanism,
@@ -295,12 +299,12 @@ claimed.**
 |---|---|
 | Language | Python 3.13 |
 | Line simulation | **SimPy** (discrete-event) |
-| Defect ML | **XGBoost**, tuned with **Optuna**; scikit-learn for splits/metrics |
+| Defect ML | **XGBoost**; optional validation-only **Optuna** tuning; scikit-learn metrics |
 | Virtual sensor | scikit-learn (spatial regression) + **FilterPy** (Kalman filter) |
 | Dashboard | **Streamlit** + **Plotly** |
 | Data | pandas / numpy; optional real-data fetch via `kaggle` |
 
-Full pinned list in [requirements.txt](requirements.txt).
+Dependency list with minimum compatible versions: [requirements.txt](requirements.txt).
 
 ---
 
@@ -309,13 +313,18 @@ Full pinned list in [requirements.txt](requirements.txt).
 ```bash
 python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+streamlit run app2.py
 ```
+
+The repository includes the compact demo replay and final model needed by the dashboard, so
+the three commands above work immediately after a clean clone. Gemini is optional.
 
 ### Full pipeline (regenerate data, train the model, launch the dashboard)
 
 ```bash
 # 1. generate the offline training data
-python data/generate_training_data.py --sessions 60 --duration 100000 --seed 100 --test-sessions 10
+python data/generate_training_data.py --sessions 60 --duration 100000 --seed 100 \
+  --validation-sessions 10 --test-sessions 10
 
 # 2. build the trend-aware feature table
 python src/feature_engineering.py
@@ -323,7 +332,11 @@ python src/feature_engineering.py
 # 3. train + evaluate the defect model on a chronological holdout
 python src/train_defect_model.py
 
-# 4. launch the dashboard (the demo)
+# 4. regenerate the replay and score it with the saved model schema
+python data/generate_demo_data.py --duration 8000 --seed 999
+python data/build_demo_inference.py
+
+# 5. launch the dashboard
 streamlit run app2.py
 ```
 
@@ -339,7 +352,13 @@ python src/line_sim.py                    # simulate the line, print station sta
 python src/bottleneck_detect.py           # detect the bottleneck
 python src/effective_trust.py             # trust-gating validation
 python src/personas.py                    # print all three persona views
-python src/lead_time_eval.py              # detection lead-time numbers
+```
+
+Optional validation-only tuning is explicit:
+
+```bash
+python src/optuna_tune.py --study defect --defect-trials 50
+python src/train_defect_model.py --use-tuned
 ```
 
 ---

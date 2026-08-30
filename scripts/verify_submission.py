@@ -21,12 +21,31 @@ REQUIRED_FILES = (
     "src/virtual_sensor.py",
     "src/defect_model.py",
     "src/effective_trust.py",
+    "artifacts/defect_model.json",
+    "artifacts/defect_model_meta.json",
+    "data/demo_live/line_events.csv",
+    "data/demo_live/buffer_history.csv",
+    "data/demo_live/health_log.csv",
+    "data/demo_live/sensor_log.csv",
+    "data/demo_live/unit_log.csv",
+    "data/demo_live/unit_summary.csv",
+    "data/demo_live/station_stats.csv",
+    "data/demo_live/station_registry.csv",
+    "data/demo_live/unit_visit_times.csv",
+    "data/demo_live/demo_assessment.csv",
+    "data/demo_live/virtual_sensor_events.csv",
+    "data/demo_live/manifest.json",
+    "data/demo_live/bottleneck_report.json",
 )
 ALLOWED_GENERATED_PLACEHOLDERS = {
     "artifacts/.gitkeep",
     "artifacts/tuning/.gitkeep",
     "data/demo_live/.gitkeep",
     "data/simulated/.gitkeep",
+}
+PACKAGED_RUNTIME_FILES = {
+    relative for relative in REQUIRED_FILES
+    if relative.startswith(("artifacts/", "data/demo_live/"))
 }
 GENERATED_PREFIXES = ("artifacts/", "data/demo_live/", "data/simulated/")
 SECRET_NAMES = {".env", "secrets.toml"}
@@ -57,7 +76,7 @@ def main() -> int:
         if relative not in tracked:
             problems.append(f"required submission file is not tracked: {relative}")
     for relative in sorted(tracked):
-        if relative in ALLOWED_GENERATED_PLACEHOLDERS:
+        if relative in ALLOWED_GENERATED_PLACEHOLDERS | PACKAGED_RUNTIME_FILES:
             continue
         if relative.startswith(GENERATED_PREFIXES):
             problems.append(f"generated asset is tracked: {relative}")
@@ -83,7 +102,7 @@ def main() -> int:
     print("Submission verification passed.")
     print("  Primary dashboard: app2.py")
     print(f"  Tracked files checked: {len(tracked)}")
-    print("  Generated data, weights, tuning output, and secrets are not tracked.")
+    print("  Compact runtime assets are tracked; training data, tuning output, and secrets are not.")
     return 0
 
 
