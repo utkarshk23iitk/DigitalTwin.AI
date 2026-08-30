@@ -1,0 +1,28 @@
+{
+  "best_trial_number": 30,
+  "metric_name": "composite_defect_score",
+  "metric_value": 0.5887725023455167,
+  "params": {
+    "threshold_params": {
+      "num_thresholds": 187,
+      "quantile_high": 0.9391901396507563,
+      "quantile_low": 0.8054720006244207
+    },
+    "xgb_params": {
+      "colsample_bytree": 0.6492837792982926,
+      "gamma": 0.028343268987390816,
+      "grow_policy": "depthwise",
+      "learning_rate": 0.025651576570773806,
+      "max_bin": 436,
+      "max_delta_step": 0.8763302040114359,
+      "max_depth": 2,
+      "min_child_weight": 17.169998238104434,
+      "n_estimators": 271,
+      "reg_alpha": 0.5695539416333453,
+      "reg_lambda": 0.08793457041900042,
+      "subsample": 0.9013453853303832
+    }
+  },
+  "saved_at_utc": "2026-08-29T09:03:56+00:00",
+  "study_name": "digitaltwin_defect_model"
+}

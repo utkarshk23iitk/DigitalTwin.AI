@@ -1,0 +1,18 @@
+{
+  "best_trial_number": 24,
+  "metric_name": "composite_virtual_score",
+  "metric_value": 0.6358393455173047,
+  "params": {
+    "corr_threshold": 0.30339956331335827,
+    "min_pair_rows": 71,
+    "q_scale": 0.4921585087820257,
+    "r_floor": 4.3757471080000446e-06,
+    "r_scale": 2.25195281480759,
+    "tier_a_max_staleness": 90.54598278726532,
+    "tier_a_window_ticks": 7,
+    "tier_c_max_staleness": 7088.552384759069,
+    "tier_c_window_checks": 4
+  },
+  "saved_at_utc": "2026-08-29T08:59:12+00:00",
+  "study_name": "digitaltwin_virtual_sensor"
+}
