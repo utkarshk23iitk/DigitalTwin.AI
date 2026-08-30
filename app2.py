@@ -10,8 +10,6 @@ from __future__ import annotations
 import json
 import os
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -966,74 +964,61 @@ def _offline_answer(question: str, context: dict[str, Any]) -> str:
     return "The current data is insufficient to determine this reliably."
 
 
-def _extract_response_text(payload: dict[str, Any]) -> str:
-    chunks: list[str] = []
-    for item in payload.get("output", []):
-        for content in item.get("content", []):
-            if content.get("type") == "output_text" and content.get("text"):
-                chunks.append(content["text"])
-    return "\n".join(chunks).strip()
-
-
-def _classify_llm_http_error(exc: urllib.error.HTTPError) -> tuple[str, str]:
-    error_code = ""
-    try:
-        payload = json.loads(exc.read().decode("utf-8"))
-        error = payload.get("error", {})
-        error_code = str(error.get("code") or error.get("type") or "")
-    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
-        pass
-    if exc.code == 429:
-        if error_code in {"insufficient_quota", "billing_hard_limit_reached"}:
-            return error_code, "Cloud LLM quota is unavailable (HTTP 429). Check billing/credits and the API project linked to this key."
-        return error_code, "Cloud LLM rate limit reached (HTTP 429). Wait briefly or check the API project's request and token limits."
-    if exc.code == 401:
-        return error_code, "Cloud LLM authentication failed (HTTP 401). Replace the API key with a valid server-side key."
-    if exc.code == 403:
-        return error_code, "Cloud LLM access was denied (HTTP 403). Check the API project's model permissions."
-    return error_code, f"Cloud LLM request failed with HTTP {exc.code}."
+def _classify_gemini_error(code: int) -> str:
+    if code == 429:
+        return "Gemini rate limit or free-tier quota reached (HTTP 429). Wait briefly or check the API project's limits."
+    if code in {401, 403}:
+        return f"Gemini authentication or access failed (HTTP {code}). Check the API key and project permissions."
+    if code == 404:
+        return "The configured Gemini model was not found (HTTP 404). Check GEMINI_MODEL."
+    if code == 400:
+        return "Gemini rejected the request (HTTP 400). Check the configured model and request limits."
+    if code >= 500:
+        return f"Gemini is temporarily unavailable (HTTP {code})."
+    return f"Gemini request failed with HTTP {code}."
 
 
 def _call_llm(context: dict[str, Any], request_text: str) -> str:
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured")
+        raise RuntimeError("GEMINI_API_KEY is not configured")
+    try:
+        from google import genai
+        from google.genai import errors, types
+    except ImportError as exc:
+        raise RuntimeError("The google-genai package is not installed. Run pip install -r requirements.txt.") from exc
+
     prompt = (
         "Use only the JSON context below. Do not calculate new plant metrics, infer causation, or invent facts. "
         "If the context cannot answer the request, respond exactly: The current data is insufficient to determine this reliably.\n\n"
         f"CURRENT_TWIN_CONTEXT={json.dumps(context, separators=(',', ':'), default=str)}\n\nREQUEST={request_text}"
     )
-    body = json.dumps({
-        "model": os.getenv("OPENAI_MODEL", "gpt-5-mini"),
-        "instructions": "You are Twinly's concise industrial operations copilot. Remain grounded in supplied structured data.",
-        "input": prompt, "max_output_tokens": 450, "store": False,
-    }).encode("utf-8")
-    request = urllib.request.Request(
-        "https://api.openai.com/v1/responses", data=body, method="POST",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+    client = genai.Client(api_key=api_key)
+    config = types.GenerateContentConfig(
+        system_instruction="You are Twinly's concise industrial operations copilot. Remain grounded in supplied structured data.",
+        max_output_tokens=450,
+        temperature=0.2,
     )
     for attempt in range(2):
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                text = _extract_response_text(json.loads(response.read().decode("utf-8")))
-                if not text:
-                    raise RuntimeError("The cloud model returned no text.")
-                return text
-        except urllib.error.HTTPError as exc:
-            error_code, message = _classify_llm_http_error(exc)
-            quota_error = error_code in {"insufficient_quota", "billing_hard_limit_reached"}
-            if exc.code == 429 and not quota_error and attempt == 0:
-                retry_after = exc.headers.get("Retry-After", "1")
-                try:
-                    wait_seconds = min(3.0, max(0.5, float(retry_after)))
-                except ValueError:
-                    wait_seconds = 1.0
-                time.sleep(wait_seconds)
+            response = client.models.generate_content(
+                model=os.getenv("GEMINI_MODEL", "gemini-3.7-flash"),
+                contents=prompt,
+                config=config,
+            )
+        except errors.APIError as exc:
+            code = int(exc.code or 0)
+            if (code == 429 or code >= 500) and attempt == 0:
+                time.sleep(1.0)
                 continue
-            raise RuntimeError(message) from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError("Cloud LLM connection failed. Check network access and try again.") from exc
-    raise RuntimeError("Cloud LLM remained unavailable after retrying.")
+            raise RuntimeError(_classify_gemini_error(code)) from exc
+        except Exception as exc:
+            raise RuntimeError("Gemini connection failed. Check network access and try again.") from exc
+        text = (response.text or "").strip()
+        if not text:
+            raise RuntimeError("Gemini returned no text, possibly because the response was filtered.")
+        return text
+    raise RuntimeError("Gemini remained unavailable after retrying.")
 
 
 def generate_shift_summary(context: dict[str, Any], use_llm: bool) -> str:
@@ -1045,7 +1030,7 @@ def answer_dashboard_question(question: str, context: dict[str, Any], use_llm: b
 
 
 def render_ai_copilot(context: dict[str, Any]) -> None:
-    has_key = bool(os.getenv("OPENAI_API_KEY"))
+    has_key = bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"))
     st.markdown(
         '<div class="llm-flow">'
         '<div class="llm-step"><strong>1 · Twin engine</strong>Calculates live metrics, risks and trust locally.</div>'
@@ -1061,11 +1046,11 @@ def render_ai_copilot(context: dict[str, Any]) -> None:
         st.caption("The Copilot receives compact calculated outputs, never raw CSVs, and is not allowed to calculate plant metrics.")
     with right:
         if has_key:
-            use_llm = st.toggle("Use configured LLM", value=True, key="use_cloud_llm")
-            st.caption(f'Cloud model: {os.getenv("OPENAI_MODEL", "gpt-5-mini")}')
+            use_llm = st.toggle("Use Gemini", value=True, key="use_cloud_llm")
+            st.caption(f'Gemini model: {os.getenv("GEMINI_MODEL", "gemini-3.7-flash")}')
         else:
             use_llm = False
-            st.info("No `OPENAI_API_KEY` found. Grounded local mode is active; the rest of Twinly works normally.")
+            st.info("No `GEMINI_API_KEY` found. Grounded local mode is active; the rest of Twinly works normally.")
     if st.button("Generate Current Shift Summary", type="primary", key="generate_summary"):
         try:
             st.session_state.shift_summary = generate_shift_summary(context, use_llm)
