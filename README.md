@@ -395,7 +395,7 @@ Compact structured snapshot (risk scores, actions, bottleneck, trust,
 station health — numbers only, nothing the Copilot invents)
       │
       ▼
-OpenAI Responses API
+Google Gemini API
       │
       ▼
 Grounded narration + interactive Q&A, shown in the dashboard's own
@@ -420,8 +420,8 @@ dependency the rest of the system relies on.
 **Setup** (optional — the dashboard runs fully without it):
 
 ```bash
-export OPENAI_API_KEY="your_rotated_server_side_key"
-export OPENAI_MODEL="gpt-5-mini"
+export GEMINI_API_KEY="your_rotated_server_side_key"
+export GEMINI_MODEL="gemini-2.5-flash"
 streamlit run app2.py
 ```
 
