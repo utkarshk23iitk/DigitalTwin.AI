@@ -1,0 +1,120 @@
+{
+  "primary": {
+    "index": 6,
+    "name": "Topcoat",
+    "score": 1.453,
+    "utilisation": 0.974,
+    "has_sensor": true
+  },
+  "ranking": [
+    {
+      "index": 6,
+      "name": "Topcoat",
+      "score": 1.453,
+      "utilisation": 0.974,
+      "queue_slope": -0.0,
+      "is_bottleneck": true,
+      "has_sensor": true
+    },
+    {
+      "index": 5,
+      "name": "Primer",
+      "score": 1.368,
+      "utilisation": 0.722,
+      "queue_slope": 0.015,
+      "is_bottleneck": false,
+      "has_sensor": true
+    },
+    {
+      "index": 4,
+      "name": "Paint-Inspect",
+      "score": 1.337,
+      "utilisation": 0.833,
+      "queue_slope": -0.0,
+      "is_bottleneck": false,
+      "has_sensor": false
+    },
+    {
+      "index": 1,
+      "name": "Body-Weld",
+      "score": 1.264,
+      "utilisation": 0.857,
+      "queue_slope": 0.0,
+      "is_bottleneck": false,
+      "has_sensor": true
+    },
+    {
+      "index": 0,
+      "name": "Frame-Weld",
+      "score": 1.24,
+      "utilisation": 0.873,
+      "queue_slope": 0.036,
+      "is_bottleneck": false,
+      "has_sensor": true
+    },
+    {
+      "index": 3,
+      "name": "Seal",
+      "score": 1.225,
+      "utilisation": 0.715,
+      "queue_slope": -0.0,
+      "is_bottleneck": false,
+      "has_sensor": true
+    },
+    {
+      "index": 2,
+      "name": "Door-Fit",
+      "score": 1.194,
+      "utilisation": 0.775,
+      "queue_slope": 0.0,
+      "is_bottleneck": false,
+      "has_sensor": true
+    },
+    {
+      "index": 10,
+      "name": "Electrical",
+      "score": 0.964,
+      "utilisation": 0.709,
+      "queue_slope": 0.0,
+      "is_bottleneck": false,
+      "has_sensor": true
+    },
+    {
+      "index": 9,
+      "name": "Torque-2",
+      "score": 0.833,
+      "utilisation": 0.669,
+      "queue_slope": 0.0,
+      "is_bottleneck": false,
+      "has_sensor": false
+    },
+    {
+      "index": 8,
+      "name": "Torque-1",
+      "score": 0.831,
+      "utilisation": 0.671,
+      "queue_slope": 0.0,
+      "is_bottleneck": false,
+      "has_sensor": true
+    },
+    {
+      "index": 7,
+      "name": "Cure",
+      "score": 0.802,
+      "utilisation": 0.654,
+      "queue_slope": 0.0,
+      "is_bottleneck": false,
+      "has_sensor": true
+    },
+    {
+      "index": 11,
+      "name": "Final-QC",
+      "score": 0.274,
+      "utilisation": 0.637,
+      "queue_slope": 0.0,
+      "is_bottleneck": false,
+      "has_sensor": true
+    }
+  ],
+  "forming": []
+}

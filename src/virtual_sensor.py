@@ -52,6 +52,7 @@ CHANNELS = ("torque", "vibration", "temperature")
 # cost versus a wider Kalman confidence interval.
 DEFAULT_VIRTUAL_SENSOR_PARAMS = {
     "corr_threshold": 0.30,
+    "tier_b_fallback_corr_threshold": 0.05,
     "min_pair_rows": 30,
     "q_scale": 0.5,
     "r_scale": 1.0,
@@ -119,7 +120,8 @@ class SpatialVirtualSensor:
     """Regress a station's value on OTHER stations' observed readings."""
 
     def __init__(self, station: int, channel: str, predictor_cols: list[str],
-                model: LinearRegression, residual_std: float):
+                model: LinearRegression, residual_std: float,
+                corr_strength: float = 1.0):
         self.station = station
         self.channel = channel
         self.predictor_cols = predictor_cols
@@ -128,6 +130,7 @@ class SpatialVirtualSensor:
         # richer version would predict per-row interval width (e.g. via
         # quantile regression); this is the honest minimum for a POC.
         self.residual_std = residual_std
+        self.corr_strength = float(max(0.0, min(1.0, corr_strength)))
 
     def estimate(self, observed_row: dict) -> tuple[float | None, float]:
         x = [observed_row.get(c) for c in self.predictor_cols]
@@ -136,8 +139,9 @@ class SpatialVirtualSensor:
         x_df = pd.DataFrame([x], columns=self.predictor_cols)
         value = float(self.model.predict(x_df)[0])
         # confidence: 1 / (1 + normalised residual spread) -> in (0, 1],
-        # shrinking as the regression's historical error grows.
-        confidence = float(1.0 / (1.0 + self.residual_std))
+        # shrinking as the regression's historical error grows. If we had to
+        # accept a weakly correlated Tier-B fallback, damp confidence further.
+        confidence = float(1.0 / (1.0 + self.residual_std)) * self.corr_strength
         return value, confidence
 
 
@@ -205,10 +209,42 @@ def _calibrate_kalman(sensor_log_train: pd.DataFrame, station: int, channel: str
     return sensor
 
 
+def _fit_spatial_sensor(true_train: pd.DataFrame, obs_train: pd.DataFrame, target_col: str,
+                        ranked: list[tuple[str, float]], min_abs_corr: float,
+                        min_pair_rows: int, station: int, channel: str
+                        ) -> tuple[str, dict]:
+    predictor_cols = [c for c, r in ranked if abs(r) >= float(min_abs_corr)][:3]
+    if not predictor_cols and ranked:
+        predictor_cols = [ranked[0][0]]
+    if not predictor_cols:
+        return "unrecoverable", {"reason": "no usable predictors for spatial fit"}
+
+    keys = ["session_id", "unit_id"]
+    obs_side = obs_train[keys + predictor_cols]
+    true_side = true_train[keys + [target_col]]
+    train_rows = obs_side.merge(true_side, on=keys, how="inner").drop(columns=keys)
+    train_rows = train_rows.dropna()
+    if len(train_rows) < int(min_pair_rows):
+        return "unrecoverable", {"reason": "too few complete rows to fit"}
+
+    model = LinearRegression().fit(train_rows[predictor_cols], train_rows[target_col])
+    resid = train_rows[target_col] - model.predict(train_rows[predictor_cols])
+    top_corr = abs(float(ranked[0][1])) if ranked else 0.0
+    detail = {
+        "predictors": predictor_cols,
+        "top_corr": round(ranked[0][1], 3) if ranked else None,
+        "sensor": SpatialVirtualSensor(
+            station, channel, predictor_cols, model, float(resid.std()), corr_strength=top_corr
+        ),
+    }
+    return "spatial", detail
+
+
 def fit_virtual_sensors(verbose: bool = True, params: dict | None = None) -> dict:
     cfg = {**DEFAULT_VIRTUAL_SENSOR_PARAMS, **(params or {})}
     true, obs, registry, sensor_log, manifest = load_all()
     true_train = _train(true, manifest)
+    obs_train = _train(obs, manifest)
     sensor_log_train = _train(sensor_log, manifest)
 
     sensors: dict[tuple[int, str], dict] = {}
@@ -222,27 +258,16 @@ def fit_virtual_sensors(verbose: bool = True, params: dict | None = None) -> dic
             best = ranked[0] if ranked else None
 
             if best and abs(best[1]) >= float(cfg["corr_threshold"]):
-                predictor_cols = [c for c, r in ranked if abs(r) >= float(cfg["corr_threshold"])][:3]
-                # Predictors come from the OBSERVED table (what's actually
-                # available live); the target comes from the TRUE table,
-                # since a tier-B target has no observed column at all. Join
-                # explicitly rather than assume matching row order.
-                keys = ["session_id", "unit_id"]
-                obs_side = _train(obs, manifest)[keys + predictor_cols]
-                true_side = _train(true, manifest)[keys + [target_col]]
-                train_rows = obs_side.merge(true_side, on=keys, how="inner").drop(columns=keys)
-                train_rows = train_rows.dropna()
-                if len(train_rows) < int(cfg["min_pair_rows"]):
-                    method, detail = "unrecoverable", {"reason": "too few complete rows to fit"}
-                else:
-                    model = LinearRegression().fit(
-                        train_rows[predictor_cols], train_rows[target_col])
-                    resid = train_rows[target_col] - model.predict(train_rows[predictor_cols])
-                    method = "spatial"
-                    detail = {"predictors": predictor_cols,
-                             "top_corr": round(best[1], 3),
-                             "sensor": SpatialVirtualSensor(
-                                 station, ch, predictor_cols, model, float(resid.std()))}
+                method, detail = _fit_spatial_sensor(
+                    true_train, obs_train, target_col, ranked, float(cfg["corr_threshold"]),
+                    int(cfg["min_pair_rows"]), station, ch
+                )
+            elif tier == "B" and ranked and abs(best[1]) >= float(cfg["tier_b_fallback_corr_threshold"]):
+                method, detail = _fit_spatial_sensor(
+                    true_train, obs_train, target_col, ranked,
+                    float(cfg["tier_b_fallback_corr_threshold"]),
+                    int(cfg["min_pair_rows"]), station, ch
+                )
             else:
                 kalman = _calibrate_kalman(sensor_log_train, station, ch, cfg)
                 if kalman is not None:

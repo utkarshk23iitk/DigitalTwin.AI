@@ -1,0 +1,6 @@
+channel,is_decoy
+torque,False
+vibration,False
+temperature,False
+pressure,True
+humidity,True

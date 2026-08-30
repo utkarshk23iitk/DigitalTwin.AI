@@ -214,15 +214,11 @@ def build_tier_c_kalman_features(sensors: dict, unit_visit_times: pd.DataFrame,
     return out.reset_index()
 
 
-def build_features(verbose: bool = True, params: dict | None = None) -> pd.DataFrame:
+def build_features_from_frames(obs: pd.DataFrame, registry: pd.DataFrame,
+                               sensor_log: pd.DataFrame, unit_visit_times: pd.DataFrame,
+                               sensors: dict, verbose: bool = True,
+                               params: dict | None = None) -> pd.DataFrame:
     cfg = {**DEFAULT_FEATURE_PARAMS, **load_tuned_virtual_sensor_params(), **(params or {})}
-    true, obs, registry, sensor_log, manifest = load_all()
-    unit_visit_times = pd.read_csv(DATA_DIR / "unit_visit_times.csv")
-
-    if verbose:
-        print("[1/4] fitting virtual sensors (needed for tier B/C features)...")
-    sensors = fit_virtual_sensors(verbose=False, params=cfg)
-
     if verbose:
         print("[2/4] tier A/C rolling trend features...")
     tier_ac = build_tier_a_c_features(unit_visit_times, sensor_log, registry, cfg)
@@ -246,6 +242,26 @@ def build_features(verbose: bool = True, params: dict | None = None) -> pd.DataF
         print(f"\n[done] {len(result)} units x {n_feat} engineered features")
         print(f"       defect rate: {result['response'].mean() * 100:.3f}%")
     return result
+
+
+def build_features(verbose: bool = True, params: dict | None = None) -> pd.DataFrame:
+    cfg = {**DEFAULT_FEATURE_PARAMS, **load_tuned_virtual_sensor_params(), **(params or {})}
+    true, obs, registry, sensor_log, manifest = load_all()
+    unit_visit_times = pd.read_csv(DATA_DIR / "unit_visit_times.csv")
+
+    if verbose:
+        print("[1/4] fitting virtual sensors (needed for tier B/C features)...")
+    sensors = fit_virtual_sensors(verbose=False, params=cfg)
+
+    return build_features_from_frames(
+        obs=obs,
+        registry=registry,
+        sensor_log=sensor_log,
+        unit_visit_times=unit_visit_times,
+        sensors=sensors,
+        verbose=verbose,
+        params=cfg,
+    )
 
 
 if __name__ == "__main__":

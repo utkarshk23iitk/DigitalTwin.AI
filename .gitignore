@@ -9,7 +9,14 @@ data/bosch_numeric_sample.csv
 data/train_numeric.csv
 data/*.zip
 data/simulated/
-artifacts/
+artifacts/*
+!artifacts/defect_model.json
+!artifacts/defect_model_meta.json
+!artifacts/tuning/
+artifacts/tuning/*
+!artifacts/tuning/defect_model_best.json
+!artifacts/tuning/virtual_sensor_best.json
+artifacts/tuning/checkpoints/
 *.db
 *.sqlite
 *.sqlite3
