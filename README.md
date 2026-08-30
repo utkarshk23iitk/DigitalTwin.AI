@@ -371,11 +371,11 @@ python src/train_defect_model.py --use-tuned
   detail), **AI Copilot** (grounded narration over the same computed state), **Model
   Analytics** (the held-out validation numbers in §2.5), and **Operational Perspectives** /
   **Business & Scale** for the Supervisor/Manager/Leadership and ROI framing.
-- Demo video: *link to be added before final submission.*
-- Screenshots: *to be added before final submission.*
+
+![Dashboard Screenshot](docs/Screenshot%202026-08-31%20050136.png)
 
 ---
-
+![Dashboard Screenshot](docs/Screenshot%202026-08-31%20050634.png)
 ## 9. Known Limitations & Future Improvements
 
 - **Real telemetry integration** — swap the SimPy source for an actual PLC/SCADA/historian
