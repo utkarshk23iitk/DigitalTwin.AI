@@ -129,9 +129,11 @@ Every number below comes from a held-out set the model never trained on — noth
 asserted without a check behind it.
 
 - **Defect model**: chronological held-out **ROC AUC 0.7153** (recall 0.2105, precision 0.0350,
-  MCC 0.0737) on 13,659 held-out rows containing 76 positive examples — a rare-event ranking
-  metric, not raw accuracy, since a model predicting every unit as non-defective would look
-  accurate at this class imbalance while catching nothing.
+  MCC 0.0737; recall is also bounded in part by the simulation design because ~26% of defects
+  are spontaneous and have no measurable precursor signal, see [§5](#5-data--assumptions)) on
+  13,659 held-out rows containing 76 positive examples — a rare-event ranking metric, not raw
+  accuracy, since a model predicting every unit as non-defective would look accurate at this
+  class imbalance while catching nothing.
 - **Bottleneck detection**: median **680s lead time** ahead of the bottleneck forming, at a
   **27.9% false-alarm rate** we're still tuning down.
 - **Effective Trust actually separates good flags from bad ones**: AUTO-ACT flags are
@@ -149,7 +151,7 @@ asserted without a check behind it.
   forward-fill by 9–20%; spatial regression beats a naive mean-guess by 29–44% overall, and
   by 54–66% specifically during drift episodes — the case that matters most for prediction.
 - AUTO-ACT vs. HUMAN-VERIFY defect rates: 5.24% vs. 1.75%.
-- Small-sample AUC variance and the ~30% of defects that are spontaneous and unlearnable by
+- Small-sample AUC variance and the ~26% of defects that are spontaneous and unlearnable by
   design are known caveats, documented in full in [docs/SUBMISSION_REPORT.md](docs/SUBMISSION_REPORT.md).
 
 </details>
@@ -217,6 +219,7 @@ Fresh demo shift (PLC/SCADA/MES in production)
 - **Causally-linked bottleneck + defect signals** — a hidden per-station health state drives
   sensor drift, cycle-time/failure-rate creep, *and* defect risk together, so predictions are
   trend-based on a real shared cause rather than independent threshold trips on decorative
+  sensor channels.
 - **Late-surfacing defect tracing** — `defect_occurred_at` vs. `defect_caught_at` gives a
   genuine (station-based) detection lead-time metric instead of an assumed one.
 - **Effective Trust gates every action** — `input_trust × model_confidence` (multiplied, not
